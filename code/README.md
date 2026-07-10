@@ -15,7 +15,7 @@ running app) see the sibling sets:
 - **Tenant owner** UI — [`../tenant/README.md`](https://github.com/TitaniaAnn/makerfolio-saas/blob/main/design-docs/walkthroughs/tenant/README.md)
 - **Public visitor** pages — [`../visitor/README.md`](https://github.com/TitaniaAnn/makerfolio-saas/blob/main/design-docs/walkthroughs/visitor/README.md)
 
-For the *why* behind the architecture, the [docs in this repo](../README.md#documents),
+For the *why* behind the architecture, [ARCHITECTURE.md in this repo](../ARCHITECTURE.md),
 [ARCHITECTURE.md](https://github.com/TitaniaAnn/makerfolio-saas/blob/main/design-docs/ARCHITECTURE.md) and the SaaS
 invariants in [CLAUDE.md](https://github.com/TitaniaAnn/makerfolio-saas/blob/main/CLAUDE.md); for data shapes, [MODELS.md](https://github.com/TitaniaAnn/makerfolio-saas/blob/main/design-docs/MODELS.md) wins.
 

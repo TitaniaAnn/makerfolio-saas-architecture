@@ -1,83 +1,196 @@
-# makerfolio SaaS — Architecture
+# makerfolio SaaS Architecture
 
-Architecture documentation for **makerfolio** ([`TitaniaAnn/makerfolio-saas`](https://github.com/TitaniaAnn/makerfolio-saas)) —
-a multi-tenant, hosted portfolio platform for makers ("WordPress.com, but every theme, feature, and
-admin screen is shaped for makers"). Production apex is `makerfolio.art`.
+A reference architecture for [makerfolio][mf] — a multi-tenant,
+hosted portfolio platform for makers ("WordPress.com, but every
+theme, feature, and admin screen is shaped for makers"), built by
+turning an existing single-tenant PHP CMS into a SaaS without
+rewriting its controllers.
 
-This repo describes the **as-built** system: PHP 8 server-rendered, no framework, Postgres
-schema-per-tenant, Caddy + PHP-FPM on Docker, single Hetzner VM, Stripe Billing (platform
-subscriptions) + Stripe Connect (per-tenant shops), AWS SES mail, S3-compatible object storage.
+This repository is **not** the product. It is the architecture:
+the decisions, the reasons, and the maps into the (private) product
+codebase that make the claims checkable. The product is PHP 8
+server-rendered with no framework, Postgres schema-per-tenant,
+Caddy + PHP-FPM on Docker, one Hetzner VM, Stripe Billing +
+Stripe Connect, AWS SES, and S3-compatible object storage — live
+in production at [makerfolio.art][mf].
 
 ## System at a glance
 
 ```mermaid
 flowchart LR
-    V[Visitors / Makers] -->|HTTPS| CF[Cloudflare\noptional CDN edge]
-    CF --> C[Caddy 2\nTLS termination\non-demand certs]
+    V[Visitors / Makers] -->|HTTPS| C[Caddy 2\nTLS termination\non-demand certs]
     C -->|FastCGI| F[PHP-FPM\nbootstrap.php\nTenantResolver]
     C -.->|"ask: may I issue\na cert for host X?"| ASK["/caddy-ask\ninternal endpoint"]
     F --> P[(Postgres 16\npublic schema +\none schema per tenant)]
-    F --> S3[(S3-compatible\nobject storage\nR2 / B2 / S3)]
+    F --> S3[(S3-compatible\nobject storage)]
     F --> SES[AWS SES\noutbound mail]
     ST1[Stripe platform account\nsubscriptions] -->|webhooks| F
     ST2[Stripe Connect\nper-tenant shop accounts] -->|webhooks| F
     CRON[supercronic\n~16 crons] --> F
 ```
 
-One request, one tenant: Caddy terminates TLS and proxies to PHP-FPM; `bootstrap.php` resolves the
-tenant from the `Host` header and runs `SET search_path TO "tenant_<id>", public` once; every
-inherited single-tenant controller then executes **unmodified** against that tenant's schema.
+One request, one tenant: `bootstrap.php` resolves the tenant from
+the `Host` header and runs `SET search_path TO "tenant_<id>", public`
+once; every inherited single-tenant controller then executes
+**unmodified** against that tenant's schema.
 
-## Documents
+## What's here
 
-| Doc | Covers |
-|---|---|
-| [docs/01-system-context.md](docs/01-system-context.md) | Product, actors, tech stack, lineage (forked from pottery-profile-cms), sibling repos |
-| [docs/02-tenancy.md](docs/02-tenancy.md) | Schema-per-tenant model, tenant provisioning, lifecycle state machine, per-tenant migrations |
-| [docs/03-routing-and-tls.md](docs/03-routing-and-tls.md) | Caddy edge, tenant resolution pipeline, custom domains, on-demand TLS, Cloudflare |
-| [docs/04-data-model.md](docs/04-data-model.md) | Public-schema catalog, tenant-schema catalog, cross-schema reference rules |
-| [docs/05-billing-and-payments.md](docs/05-billing-and-payments.md) | Two Stripe planes, webhook idempotency contract, plan/cap enforcement, dunning |
-| [docs/06-security.md](docs/06-security.md) | Three auth keyspaces, isolation layers, CSRF/CSP hardening, support sessions, abuse controls |
-| [docs/07-operations.md](docs/07-operations.md) | Deploy topology, cron fleet + heartbeat, email, storage, backups, observability, testing |
-| [docs/08-invariants.md](docs/08-invariants.md) | The seven load-bearing invariants + key architectural decisions and their rationale |
+```
+ARCHITECTURE.md      ← the WHY: nine decisions, each with problem /
+                        decision / alternatives / seams / verified-by
+docs/                # Subsystem reference (the HOW it fits together)
+├── 01-system-context.md          ← product, actors, stack, lineage
+├── 02-tenancy.md                 ← schema-per-tenant, lifecycle, provisioning
+├── 03-routing-and-tls.md         ← Caddy, tenant resolution, custom domains
+├── 04-data-model.md              ← public + tenant schema catalogs, cross-schema rules
+├── 05-billing-and-payments.md    ← the two Stripe planes, webhook contract
+├── 06-security.md                ← auth keyspaces, isolation, support sessions
+├── 07-operations.md              ← deploy, crons, email, storage, observability
+└── 08-invariants.md              ← the seven invariants + decision log + open questions
 
-Read them in order for the full picture, or jump straight to a subsystem. Every doc cites the
-implementing files in the `makerfolio-saas` repo (e.g. `includes/TenantResolver.php`).
+code/                # Developer walkthroughs (the WHERE in the source)
+├── 01-tenancy-bootstrap-routing.md   … 10-custom-domains-tls.md
+└── README.md        ← one walkthrough per subsystem, each grounded in
+                        file:line references into the product repo
+```
 
-## Code walkthroughs
+Three layers, three questions: `ARCHITECTURE.md` answers *why is it
+shaped this way*, `docs/` answers *how do the subsystems fit
+together*, `code/` answers *where does the source do it*.
 
-[code/](code/README.md) holds the ten **developer code walkthroughs** — how each subsystem is
-actually built, grounded in `file:line` references to the source (mirrored from the main repo's
-`design-docs/walkthroughs/code/`, links rewritten to absolute GitHub URLs):
+## What this demonstrates
 
-| # | Walkthrough | # | Walkthrough |
-|---|---|---|---|
-| 01 | [Tenancy, bootstrap & routing](code/01-tenancy-bootstrap-routing.md) | 06 | [Email & deliverability](code/06-email-deliverability.md) |
-| 02 | [Auth & security](code/02-auth-and-security.md) | 07 | [Themes & content rendering](code/07-themes-content-rendering.md) |
-| 03 | [Signup & provisioning](code/03-signup-and-provisioning.md) | 08 | [Uploads, storage & images](code/08-uploads-storage-images.md) |
-| 04 | [Billing — platform plane](code/04-billing-platform-plane.md) | 09 | [Migrations & schema](code/09-migrations.md) |
-| 05 | [Shop — Connect plane](code/05-shop-connect-plane.md) | 10 | [Custom domains & TLS](code/10-custom-domains-tls.md) |
+The architectural decisions documented in detail in
+[ARCHITECTURE.md][arch], with where each one is developed:
 
-The `docs/` set answers *why the system is shaped this way*; the `code/` set answers *where and
-how the code does it*.
+1. **Schema-per-tenant tenancy via `search_path`** — cross-tenant
+   leakage made impossible at the SQL layer, not discouraged at the
+   review layer; a forgotten schema-set fails loud, never silently.
+   *([§1][arch], [docs/02][d2], [code/01][c1])*
 
-## The seven invariants (summary)
+2. **Fork the CMS; multi-tenancy lives in the bootstrap** — ~100
+   inherited controllers carry into the SaaS unmodified because
+   tenancy, edge, dialect, and storage changed underneath them.
+   *([§2][arch], [docs/01][d1])*
 
-Breaking any of these causes data leaks or billing bugs — full rationale in
-[docs/08-invariants.md](docs/08-invariants.md):
+3. **Idempotent per-tenant migrations with failure isolation** —
+   every migration re-applies harmlessly; each tenant keeps its own
+   ledger; one broken tenant never blocks the fleet.
+   *([§3][arch], [code/09][c9])*
 
-1. **Tenancy is schema-per-tenant via `search_path`** — never a `tenant_id` WHERE clause.
-2. **No foreign key crosses the schema boundary**, in either direction.
-3. **Stripe state is webhook-driven** — never optimistic local writes; INSERT-first dedup.
-4. **State changes go through `transitionTo()`** state-machine methods, not direct UPDATEs.
-5. **Migrations are per-tenant and individually idempotent**, with per-tenant failure isolation.
-6. **Three distinct auth keyspaces in one session** — platform admin, tenant admin, shop customer.
-7. **Custom-domain certs only issue for DNS-verified domains** (`/caddy-ask` gate).
+4. **Webhook-driven Stripe state** — INSERT-first dedup, handler in
+   a transaction, mail after commit; local billing state flips only
+   on enumerated webhook events, never optimistically.
+   *([§4][arch], [docs/05][d5], [code/04][c4])*
 
-## Status
+5. **Two Stripe planes that never cross** — platform subscriptions
+   vs. per-tenant Connect shops; tenants are merchant of record for
+   their own sales; the platform fee is a data column, not a rewrite.
+   *([§5][arch], [code/05][c5])*
 
-Feature-complete for the customer-facing launch: Phases 0–6 (Postgres port → multi-tenant plumbing
-→ signup → billing → custom domains → object storage → Studio tier), Phases 7a–7o launch
-hardening, Phase 9 (per-tenant shop Stripe Connect), plus post-launch operational hardening
-(health checks, cron heartbeats, operator digest, webhook ledgers) through ~PR #146. The
-per-phase as-built record is `design-docs/COMPLETION_MATRIX.md` in the main repo.
+6. **State machines behind `transitionTo()`** — tenants, domains,
+   Connect accounts, and sender identities mutate through one
+   validated, audited path; invalid transitions are unrepresentable.
+   *([§6][arch], [docs/02][d2])*
+
+7. **On-demand TLS gated by `/caddy-ask`** — runtime-added customer
+   domains get zero-config certs, but only after a DNS ownership
+   challenge; lapsed tenants stop consuming rate-limit headroom.
+   *([§7][arch], [docs/03][d3], [code/10][c10])*
+
+8. **Three auth keyspaces + audited support sessions** — operator,
+   tenant admin, and buyer never share a namespace; "log in as
+   tenant" is louder than normal access, not quieter.
+   *([§8][arch], [docs/06][d6], [code/02][c2])*
+
+9. **Boring operations** — one VM, cron not queue, heartbeat
+   dead-man's switch, swappable storage/mail/CDN seams; the split to
+   multiple VMs changes zero application code.
+   *([§9][arch], [docs/07][d7])*
+
+## What's not here
+
+This is a reference architecture. It is deliberately missing:
+
+- **The product source.** Controllers, admin UI, marketing site,
+  platform-admin console — the code lives in the product repo. The
+  [code/](code/README.md) walkthroughs cite `file:line` into it, so
+  every claim is checkable against source without the source being
+  republished.
+- **The tests.** Each ARCHITECTURE.md section ends with *Verified
+  by*, naming the PHPUnit tests and smoke scripts in the product
+  repo (420+ tests, 45+ smokes) that pin that section's contract.
+- **Operational secrets.** Deploy runbooks, incident playbooks, and
+  monitoring thresholds are summarized in
+  [docs/07-operations.md](docs/07-operations.md) but their
+  operational detail stays with the product.
+- **The upstream self-host CMS.** The single-tenant fork base is its
+  own product (MySQL + Apache, self-hosted) and is intentionally
+  untouched by everything described here.
+
+If you're looking for any of those things, you're looking for a
+different repo.
+
+## Reading order
+
+New to the system? Read [ARCHITECTURE.md][arch] §1–§2 first — they
+are the bet everything else rides on. Then
+[docs/04-data-model.md][d4] for the shape of the data, then
+whichever subsystem you care about. The
+[code/](code/README.md) walkthroughs are the fastest path into the
+actual source: each names the invariant it demonstrates and cites
+the files that implement it.
+
+## Why this exists
+
+The product is the answer to "how do you turn a finished,
+framework-less, single-tenant PHP CMS into a multi-tenant SaaS —
+with real billing, customer domains, and one-person operations —
+without rewriting the code that already works?" The architecture in
+this repo is that answer made inspectable: the tenancy model that
+required zero controller changes, the webhook and migration
+contracts that keep money and schemas correct, and the operational
+posture that keeps it runnable by one person.
+
+The full product is private. This architecture is public so the
+patterns are verifiable and reusable.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
+
+The MIT license covers the architectural documentation in this
+repository. The "makerfolio" name, branding, and product identity
+are not licensed for reuse.
+
+## About
+
+Built by [Cynthia Brown][site]. More work at:
+
+- [cynthia-brown.com][site] — portfolio
+- [makerfolio.art][mf] — the product this architecture powers
+- [mypotterystudio.com][mps] — the studio-tracking app ([architecture][mpsarch])
+- [programmingpotter.com][pp] — ceramic work and writing
+- [github.com/TitaniaAnn][gh] — other code
+
+[mf]: https://makerfolio.art
+[mps]: https://mypotterystudio.com
+[mpsarch]: https://github.com/TitaniaAnn/my-pottery-studio-architecture
+[site]: https://cynthia-brown.com
+[pp]: https://programmingpotter.com
+[gh]: https://github.com/TitaniaAnn
+[arch]: ARCHITECTURE.md
+[d1]: docs/01-system-context.md
+[d2]: docs/02-tenancy.md
+[d3]: docs/03-routing-and-tls.md
+[d4]: docs/04-data-model.md
+[d5]: docs/05-billing-and-payments.md
+[d6]: docs/06-security.md
+[d7]: docs/07-operations.md
+[c1]: code/01-tenancy-bootstrap-routing.md
+[c2]: code/02-auth-and-security.md
+[c4]: code/04-billing-platform-plane.md
+[c5]: code/05-shop-connect-plane.md
+[c9]: code/09-migrations.md
+[c10]: code/10-custom-domains-tls.md
