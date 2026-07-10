@@ -44,6 +44,23 @@ inherited single-tenant controller then executes **unmodified** against that ten
 Read them in order for the full picture, or jump straight to a subsystem. Every doc cites the
 implementing files in the `makerfolio-saas` repo (e.g. `includes/TenantResolver.php`).
 
+## Code walkthroughs
+
+[code/](code/README.md) holds the ten **developer code walkthroughs** — how each subsystem is
+actually built, grounded in `file:line` references to the source (mirrored from the main repo's
+`design-docs/walkthroughs/code/`, links rewritten to absolute GitHub URLs):
+
+| # | Walkthrough | # | Walkthrough |
+|---|---|---|---|
+| 01 | [Tenancy, bootstrap & routing](code/01-tenancy-bootstrap-routing.md) | 06 | [Email & deliverability](code/06-email-deliverability.md) |
+| 02 | [Auth & security](code/02-auth-and-security.md) | 07 | [Themes & content rendering](code/07-themes-content-rendering.md) |
+| 03 | [Signup & provisioning](code/03-signup-and-provisioning.md) | 08 | [Uploads, storage & images](code/08-uploads-storage-images.md) |
+| 04 | [Billing — platform plane](code/04-billing-platform-plane.md) | 09 | [Migrations & schema](code/09-migrations.md) |
+| 05 | [Shop — Connect plane](code/05-shop-connect-plane.md) | 10 | [Custom domains & TLS](code/10-custom-domains-tls.md) |
+
+The `docs/` set answers *why the system is shaped this way*; the `code/` set answers *where and
+how the code does it*.
+
 ## The seven invariants (summary)
 
 Breaking any of these causes data leaks or billing bugs — full rationale in
