@@ -98,7 +98,11 @@ schema, so operator dashboards never scan tenant schemas live.
 `bin/tenant-isolation-smoke.php` in the product repo provisions two
 tenants and asserts neither can see the other's rows;
 `tests/TenantResolverTest.php` pins the host-classification logic.
-Walkthrough: [code/01-tenancy-bootstrap-routing.md](code/01-tenancy-bootstrap-routing.md).
+In this repo: [tests/PgSearchPathTest.php](tests/PgSearchPathTest.php)
+demonstrates the isolation + loud-failure claim against a real
+Postgres, and [tests/TenantResolverTest.php](tests/TenantResolverTest.php)
+pins the classification matrix. Walkthrough:
+[code/01-tenancy-bootstrap-routing.md](code/01-tenancy-bootstrap-routing.md).
 
 ---
 
@@ -229,7 +233,10 @@ that today.
 
 `bin/platform-migrations-smoke.php` (fan-out + isolation),
 `bin/pg-smoke.php` (clear-and-replay), `tests/MigrationRunnerTest.php`
-in the product repo. Walkthrough: [code/09-migrations.md](code/09-migrations.md).
+in the product repo. In this repo:
+[tests/MigrationRunnerTest.php](tests/MigrationRunnerTest.php)
+(idempotency, lost-ledger re-apply, one-bad-tenant isolation).
+Walkthrough: [code/09-migrations.md](code/09-migrations.md).
 
 ---
 
@@ -302,7 +309,9 @@ four-major-version SDK bump with zero wire-shape change).
 
 `bin/billing-webhook-smoke.php` (dedup, crash-retry, out-of-order),
 `tests/SubscriptionTest.php` (status mapping) in the product repo.
-Walkthrough: [code/04-billing-platform-plane.md](code/04-billing-platform-plane.md).
+In this repo: [tests/WebhookDedupTest.php](tests/WebhookDedupTest.php)
+(the full contract, including mail-only-after-commit). Walkthrough:
+[code/04-billing-platform-plane.md](code/04-billing-platform-plane.md).
 
 ---
 
@@ -433,6 +442,8 @@ see decision 9).
 
 `tests/TenantTest.php`, `tests/TenantDomainTest.php` (edge
 validation), and the lifecycle-cron smokes in the product repo.
+In this repo: [tests/StateMachineTest.php](tests/StateMachineTest.php)
+(valid edges, audit rows, invalid jumps throw without writing).
 Walkthroughs: [code/03](code/03-signup-and-provisioning.md),
 [code/10](code/10-custom-domains-tls.md).
 
@@ -500,7 +511,9 @@ what makes that scenario contrived.
 `bin/caddy-ask-smoke.php` (allowlist matrix including the
 suspended-tenant cutoffs), `bin/tenant-domain-routing-smoke.php`,
 `tests/TenantDomainTest.php`, `tests/DomainVerifierTest.php` in the
-product repo. Walkthrough:
+product repo. In this repo:
+[tests/CaddyAskTest.php](tests/CaddyAskTest.php) (the same matrix,
+including 10-days-suspended → allow, 31 → refuse). Walkthrough:
 [code/10-custom-domains-tls.md](code/10-custom-domains-tls.md).
 
 ---
