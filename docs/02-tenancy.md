@@ -27,8 +27,9 @@ have been a far larger rewrite than the MySQL→Postgres port plus a bootstrap m
 ### Connection pooling note
 
 Schema switching via `SET search_path` is compatible with PgBouncer transaction pooling (the SET
-travels with the transaction). Per-tenant Postgres **roles** exist as defense-in-depth for
-emergency DBA work and the support-session flow, but the app pool runs as a single `app_user` —
+travels with the transaction). The app connects as a single database role. The design docs also
+call for per-tenant Postgres **roles** (USAGE on their own schema only) as defense in depth for
+emergency DBA work; those have not been built. If they are, they stay out of the app pool:
 poolers don't reset roles on reuse without `DISCARD ALL`, which would defeat prepared-statement
 caching.
 
@@ -41,7 +42,7 @@ side-effects like suspension email or Stripe cancel):
 ```mermaid
 stateDiagram-v2
     [*] --> PENDING_VERIFICATION : signup provisioned
-    PENDING_VERIFICATION --> ACTIVE : email verified
+    PENDING_VERIFICATION --> ACTIVE : email verified (same transaction as provision)
     PENDING_VERIFICATION --> SUSPENDED : 7d timeout (UNVERIFIED_TIMEOUT)
     ACTIVE --> GRACE : Stripe invoice payment failed
     GRACE --> ACTIVE : charge succeeded
@@ -52,17 +53,19 @@ stateDiagram-v2
     SUSPENDED --> PENDING_DELETION : 60d suspended (schedules +30d)
     PENDING_DELETION --> ACTIVE : tenant restores within 30d
     PENDING_DELETION --> DELETED : deletion_scheduled_at reached
-    DELETED --> [*] : handle freed 90d later (tombstone row retained)
+    DELETED --> [*] : tombstone row retained
 ```
 
 - **GRACE**: public site still serves; admin shows a "card declined" banner. Driven by the
   `stripe-dunning-sync` cron + `invoice.payment_failed` webhooks.
-- **SUSPENDED**: public site renders a friendly branded "temporarily unavailable" page; admin
-  redirects to billing-resolve.
+- **SUSPENDED**: every path, `/admin/` included, returns a branded "temporarily unavailable" 503.
+  Custom-domain certs keep renewing for the first 30 days of suspension, then stop.
 - **DELETED**: `DROP SCHEMA … CASCADE`, object-storage prefix purge, Stripe subscription
-  cancelled. The `tenants` row is kept as a **tombstone** so the handle can't be re-claimed for
-  90 days (subdomain-takeover defense). Recovery stays possible for ~30 days via PITR backups +
-  object versioning.
+  cancelled. The `tenants` row is kept as a **tombstone** with `handle_released_at` stamped 90 days
+  out, intended as a subdomain-takeover defense. **As built, the cooldown isn't enforced**: handle
+  lookups filter on `handle_released_at IS NULL`, so a deleted tenant's handle is claimable by a
+  new signup immediately. Recovery after deletion is from the nightly offsite dump, within its
+  retention window (see [07-operations](07-operations.md)); there is no PITR.
 
 ## Provisioning
 
@@ -73,20 +76,27 @@ transactional, so a failure rolls back the `CREATE SCHEMA` too):
 
 1. Insert `public.tenants` row (status `PENDING_VERIFICATION`, plan `free`, `schema_name = tenant_<id>`)
 2. `CREATE SCHEMA tenant_<id>`
-3. Apply the canonical tenant schema (`sql/init.postgres.sql`) + any incremental migrations
+3. Apply the canonical tenant schema (`sql/init.postgres.sql`, ledger pre-seeded, so no
+   incremental migration runs on a fresh tenant)
 4. Seed default settings, page text, event-type labels, page sections
-5. Insert the first `admin_users` row (role OWNER)
+5. Insert the first `admin_users` row (OWNER, via the column default)
+6. Transition the tenant to `ACTIVE` and stamp first-touch referral attribution
 
-Signup is protected by hCaptcha + `signup_attempts` rate limiting, and reserved handles
+Signup is protected by a captcha (Cloudflare Turnstile, hCaptcha as fallback) +
+`signup_attempts` rate limiting, a 12-character password floor, and reserved handles
 (hard-coded list — `admin`, `www`, `api`, … + all 2-letter strings — plus the runtime
 `handle_reservations` table for trademark/one-off blocks) are rejected. New tenants start in
-"coming soon" mode (`site_published` toggle) and go live from Settings.
+"coming soon" mode (`site_published` toggle) and go live from Settings. Provisioning from the CLI
+or platform-admin defaults to ACTIVE and published.
 
 ### Handle renames
 
-`Tenant::rename` (Free: once/year; Pro/Studio: unlimited) writes a `handle_redirects` row; the
-resolver 301-redirects the old subdomain for 1 year, then a sweep cron drops the redirect and the
-old handle enters the standard 90-day cooldown.
+`Tenant::rename` (Free: once/year; paid tiers: unlimited) writes a `handle_redirects` row; the
+resolver 301-redirects the old subdomain for 1 year. Readers filter on `expires_at`, and the
+nightly `prune-activity-logs` job deletes expired rows (the dedicated sweep cron was retired).
+`rename()` refuses a handle that is still redirecting, but signup only checks live handles and
+reservations, so a new signup can take a handle inside someone's redirect window, and the live
+tenant then wins over the redirect.
 
 ## Per-tenant migrations
 

@@ -8,7 +8,7 @@ scale; the scaling story is "buy a bigger box" until ~10K tenants:
 ```mermaid
 flowchart TB
     subgraph vm["Hetzner VM — Docker Compose (compose.prod.yml)"]
-        CADDY[caddy container\n:443/:80, on-demand TLS] -->|FastCGI :9000| FPM[web container\nPHP-FPM 8.2]
+        CADDY[caddy container\n:443/:80, CF origin cert +\non-demand TLS] -->|FastCGI :9000| FPM[web container\nPHP-FPM 8.2]
         CADDY -.->|localhost only| ASK["/caddy-ask"]
         FPM --> PG[(postgres 16 container)]
         CRON[cron container\nsupercronic] --> PG
@@ -16,6 +16,7 @@ flowchart TB
     end
     FPM --> S3[(S3-compatible bucket\nR2 / B2 / S3)]
     FPM --> SES[AWS SES]
+    CRON -->|nightly pg_dump + rsync| BOX[(offsite Storage Box\nover SSH)]
     HC[/healthz endpoint\n+ Docker healthchecks/] -.-> CADDY & FPM & CRON
 ```
 
@@ -24,8 +25,9 @@ flowchart TB
   table — Redis deliberately avoided).
 - Deploys and rollbacks (code-only and code+DB) follow `design-docs/runbooks/DEPLOY.md`;
   first-boot server provisioning in `runbooks/HETZNER_DEPLOY.md`. Migrations auto-apply on boot.
-- Cloudflare optionally fronts Caddy as a transparent CDN; admin assets are sent
-  `no-store`/revalidate so deploys aren't masked by edge caches.
+- Cloudflare proxies the platform apex and tenant subdomains (Caddy serves a Cloudflare origin
+  certificate for those); customer custom domains bypass Cloudflare and hit Caddy directly. Admin
+  assets are sent `no-store`/revalidate so deploys aren't masked by edge caches.
 - The planned split at scale: Caddy edge tier (cert issuance + LB) / stateless app tier /
   managed Postgres — application code doesn't change for any of it.
 
@@ -36,12 +38,24 @@ No queue, no Redis: all async work is periodic crons under `bin/cron/`, schedule
 Every job runs through the `run.php` **heartbeat wrapper**, which records into `public.cron_runs`
 — a dead-man's-switch board in platform-admin shows any job that hasn't succeeded on schedule.
 
+18 jobs on 6 schedule lines. Jobs that share a cadence share a crontab line (`run.php` takes
+several job names), but each still runs in its own child process and writes its own heartbeat
+row, so one failing job doesn't hide behind a neighbour. `CronHeartbeatTest` parses the crontab
+and fails if it drifts from `CronHeartbeat::EXPECTED_INTERVAL_MINUTES`, which keeps the
+dead-man's-switch thresholds honest.
+
 | Cadence | Jobs |
 |---|---|
-| every 5 min | `verify-pending-domains` (DNS checks → `DNS_VERIFIED`), `monitor-provisioning-domains` (TLS probe → `ACTIVE`), `sender-identity-verify-sweep` (SES identity polling + failure guards) |
-| every 15 min | `stripe-dunning-sync` (reconcile GRACE-tenant subscription status) |
-| hourly | `storage-rollup` (per-tenant usage into `usage_rollups`) |
-| daily | `sweep-pending-verifications` (7 d unverified → SUSPENDED), `sweep-suspended-tenants` (60 d → PENDING_DELETION → hard delete), `abandon-old-signups`, `reconcile-tenant-denorms`, `payment-reminder-emails`, `cert-health-check`, `sweep-failed-domains`, `sweep-expired-transfers`, `sweep-expired-handle-redirects`, `prune-activity-logs`, `operator-digest` (daily operator email) |
+| every 5 min | `verify-pending-domains` (DNS checks → `DNS_VERIFIED`), `monitor-provisioning-domains` (TLS probe → `ACTIVE`) |
+| every 15 min | `sender-identity-verify-sweep` (SES identity polling + failure guards), `uirlis-telemetry` (optional external health push) |
+| hourly | `storage-rollup` (per-tenant usage into `usage_rollups`), `stripe-dunning-sync` (reconcile GRACE-tenant subscription status; a webhook backstop, so hourly is enough) |
+| daily, in order | `sweep-pending-verifications`, `sweep-suspended-tenants` (60 d → PENDING_DELETION → hard delete), `abandon-old-signups`, `reconcile-tenant-denorms`, `sweep-failed-domains`, `cert-health-check`, `payment-reminder-emails`, `check-uploads-tree` (storage-layout invariant, below), `prune-activity-logs` (also drops expired `handle_redirects` rows), `operator-digest` (daily operator email) |
+| 00:45 daily | `metrics-rollup` (growth metrics, below) |
+| 03:15 daily | `backup-offsite` |
+
+Two sweeps were retired in the 2026-08 simplification pass (`sweep-expired-transfers`,
+`sweep-expired-handle-redirects`): the pages that read those rows already filter on
+`expires_at`, so the sweeps were cosmetic.
 
 State-changing sweeps write what they did to `platform_admin_activity` (one row per transition +
 a summary row only when something changed), so the operator reads outcomes in the admin UI, not
@@ -70,14 +84,39 @@ direct-to-S3 upload is a known future optimization). All media rows store tenant
 `*_storage_key`s; URL resolution goes through `StorageUrl::urlFor`. Per-tenant usage is enforced
 against plan caps via the hourly rollup.
 
+Tenant scoping of keys is structural, the storage-layer equivalent of `search_path`:
+
+- `get_storage()` returns a **`TenantStorage`** decorator whenever a tenant is resolved. It is the
+  only place a `<tenant_id>/` key root is assembled: relative keys get the root prepended, a
+  fully-qualified key passes only if its root matches the bound tenant, and a key rooted in
+  another tenant's prefix throws. A flat (un-rooted) key is unrepresentable in tenant context.
+- Platform-scope code (the usage rollup, `Tenant::hardDelete`'s prefix purge, repair scripts)
+  asks for the raw driver explicitly via `get_storage_backend()` / `StorageFactory::backend()`.
+- In tenant context uploads write to storage only. The old flat-disk copy under
+  `public/uploads/<subdir>/` outlived the legacy-column drop for a while and wrote unread,
+  unmetered duplicates, which is why the wrapper now makes that path impossible rather than
+  discouraged.
+- The nightly `check-uploads-tree` cron asserts every file under `uploads/` sits inside a numeric
+  `<tenant_id>/` root and exits non-zero the day a regression appears;
+  `bin/migrate-flat-uploads.php` (idempotent) repairs a tree that already has flat files.
+- Image intake rejects pixel-flood images (checked with `getimagesize` before GD decodes) and derives the stored extension from the validated MIME type, never from the
+  uploaded filename.
+
 ## Backups & recovery
 
-- **Postgres**: `pg_dump` every 6 h to object storage (30-day retention) + WAL/PITR (7-day).
-- **Object storage**: bucket versioning, 30-day prior-version retention.
+- **Nightly offsite** (`backup-offsite`, 03:15 UTC): a `pg_dump -Fc` of the whole database
+  (public plus every tenant schema in one file, selectively restorable with `pg_restore`) and an
+  rsync of the uploads volume, both over SSH to an offsite storage box. Dumps are pruned after a
+  configurable retention window. The rsync deliberately runs **without `--delete`**,
+  so a mass-deletion bug or compromise can't propagate into the backup on the next tick.
+- The job is a no-op until its destination is configured, and a configured-but-broken run exits
+  non-zero, so the heartbeat board shows it FAILING rather than silently not backing up.
 - **Per-tenant**: schema-per-tenant makes tenant-granular export trivial —
   `Tenant::exportToZip` powers self-service export/delete/transfer at `/admin/account/`
   (the export doubles as a portable "leave for self-host" package).
-- Deleted tenants remain recoverable ~30 days via PITR + object versioning.
+- What isn't built: the original design called for 6-hourly dumps plus WAL/PITR and bucket
+  versioning. None of that exists; recovery granularity is the last nightly dump. A deleted
+  tenant is recoverable from a dump inside the retention window, not from PITR.
 
 ## Observability
 
@@ -91,6 +130,17 @@ Post-launch ops hardening built this out well past the original "journalctl" pla
   metrics, rollup freshness signal, "Attention required" panel (GRACE tenants, stalled domain
   verifications, pending deletions), daily operator digest email.
 - `pg_stat_statements` enabled for query-level diagnosis.
+- An optional health push (`uirlis-telemetry`, every 15 min) to an external monitor; a no-op
+  unless configured.
+- **Growth metrics**: the nightly `metrics-rollup` UPSERTs one row per day into
+  `public.platform_metrics_daily` (signups, activations, churn flows, MRR, tier mix as JSONB,
+  never-activated and dormant-at-14/30/60-day counts). `MetricsRollup` keeps the arithmetic in
+  pure, unit-tested helpers and the SQL in two small DB methods. Platform-admin renders it at
+  `/platform-admin/growth/` with a CSV export.
+- **Referral attribution**: first-touch `?ref=` capture into the session at resolve time, copied
+  onto the signup and stamped once onto `tenants.referral_*` at verification (never
+  overwritten). The referring tenant is stored as a plain slug string, not an FK, in keeping with
+  invariant 2. `/platform-admin/referrals/` reports signups per live free site per month.
 - Runbooks: `INCIDENTS.md` (7 incident classes with diagnose/recover/prevent),
   `MONITORING.md` (per-subsystem signal tables + alert severities).
 
@@ -103,10 +153,10 @@ is the eventual limit (~50K tenants), with PgBouncer transaction pooling compati
 
 ## Testing strategy
 
-- **PHPUnit** (420+ tests): pure helpers and extractable logic only; the test bootstrap loads no
+- **PHPUnit** (~650 tests across 62 files): pure helpers and extractable logic only; the test bootstrap loads no
   `.env`/DB/Stripe (in-memory SQLite), so the suite runs anywhere. GD-dependent tests skip
   cleanly.
-- **Smokes** (45+ `bin/*-smoke.php`): DB-touching flows — provisioning, tenant isolation,
+- **Smokes** (47 scripts under `bin/` and `bin/cron/`): DB-touching flows — provisioning, tenant isolation,
   billing + webhooks, domain routing, `/caddy-ask` policy, storage backends, cron policies —
   each asserting against a real Postgres. `pg-smoke` runs in a throwaway schema.
 - **CI gate**: `php -l` on every file + the full PHPUnit suite must be green.
