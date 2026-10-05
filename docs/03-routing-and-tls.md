@@ -2,20 +2,32 @@
 
 ## Caddy as the front edge
 
-Caddy 2 terminates TLS for three hostname classes and proxies everything to one PHP-FPM pool:
+Caddy 2 terminates TLS for two public hostname classes and proxies everything to one PHP-FPM pool:
 
-| Hostname class | Cert strategy |
-|---|---|
-| `makerfolio.art`, `www.makerfolio.art` | Standard ACME cert |
-| `*.makerfolio.art` (tenant subdomains) | Single wildcard cert via DNS-01 challenge |
-| Any other hostname (custom domains) | **On-demand TLS**: cert issued at first SNI hit, gated by the `/caddy-ask` endpoint |
+| Hostname class | Path to the box | Cert strategy |
+|---|---|---|
+| `makerfolio.art`, `*.makerfolio.art` (apex + tenant subdomains) | Proxied through Cloudflare (Full strict) | A **Cloudflare origin certificate** served from disk; no ACME, no DNS-01, no Cloudflare API token in Caddy |
+| Any other hostname (custom domains) | Straight to the box, bypassing Cloudflare | **On-demand TLS** via an `https://` catch-all: Let's Encrypt cert issued at first SNI hit, gated by `/caddy-ask` |
+
+The original design had a DNS-01 wildcard cert for the subdomains; putting Cloudflare in front of
+the platform hosts made the origin certificate simpler and removed a credential from the edge.
+One DNS detail falls out of the split: `tenants.makerfolio.art`, the CNAME target customers point
+their domains at, must be a **DNS-only** record. If the proxied wildcard swallows it, customer
+traffic arrives through Cloudflare and on-demand issuance breaks for everyone.
 
 Caddy was chosen over nginx+certbot specifically for `on_demand_tls`: N customer domains are added
 at runtime with **zero per-domain config and no reloads**. Renewals are Caddy-internal (30 days
 before expiry, retried with backoff); the platform only *monitors* cert health, it never manages
-certs. Cloudflare can sit in front as a transparent CDN (admin assets are `no-store`/revalidated
-so deploys aren't masked; the app trusts `CF-Connecting-IP` only from Cloudflare CIDRs — see
-[06-security](06-security.md)).
+certs. Both public vhosts send HSTS (`includeSubDomains` on the platform vhost only, since the
+platform can't make promises about a customer's other subdomains). Admin assets are
+`no-store`/revalidated so the CDN can't mask deploys.
+
+A few as-built Caddy lessons are worth knowing before touching the config: `on_demand_tls` takes
+only `ask` (the old `interval`/`burst` options crash `caddy run` while `caddy validate` still
+accepts them, so a restart is the only real test); the ask URL needs its trailing slash
+(`/caddy-ask/`), because newer Caddy 308s the bare directory and the internal ask client refuses
+redirects; and the ask is served by an internal `http://localhost:8080` site inside the Caddy
+container that is not published by compose.
 
 There is no router in the app: Caddy maps clean URLs to files under `public/` (the inherited
 mod_rewrite pattern, ported to a Caddyfile), and every entry point requires
@@ -45,19 +57,52 @@ sequenceDiagram
 `Auth::start()`:
 
 1. **Strip port**, lowercase.
-2. **Host == `PLATFORM_DOMAIN`** → marketing-site mode, no tenant, public schema only.
-   `/platform-admin/*` and `/platform-webhook/*` paths also skip host resolution.
+2. **Host is `PLATFORM_DOMAIN` or `www.<PLATFORM_DOMAIN>`** → marketing-site mode, no tenant,
+   public schema only. `/platform-admin`, `/signup`, `/platform-webhook` are **apex-only**: on a
+   tenant or custom host they 404 rather than fall through. `/caddy-ask` is stricter still: it
+   only answers `Host: localhost` (the internal ask site) and both public vhosts 404 it at the
+   edge, so it can't be used to enumerate domains or nudge the domain state machine.
 3. **Host ends with `.<PLATFORM_DOMAIN>`** → extract subdomain, look up tenant by `handle`.
-   Reserved handles never match tenants. On miss, check `handle_redirects` → 301 to the current
-   handle (rename support).
-4. **Anything else** → exact-hostname lookup in `public.tenant_domains`; must be `ACTIVE`.
-5. **Status gate** — tenant must be `ACTIVE` or `GRACE`. `SUSPENDED` renders the branded
-   suspension page; `PENDING_VERIFICATION` serves a "finish setup" page publicly but allows
-   `/admin/`. Unpublished ("coming soon") sites render a placeholder until the owner goes live.
+   Reserved handles route to the marketing site. On miss, check unexpired `handle_redirects` → 301
+   to the current handle (rename support).
+4. **Anything else** → exact-hostname lookup in `public.tenant_domains`; must be `ACTIVE`. The
+   auto-added `www.` sibling 301s to its apex once the apex is ACTIVE.
+5. **Status gate** — `ACTIVE`, `GRACE` and `PENDING_VERIFICATION` proceed. `SUSPENDED` returns a
+   branded 503 on every path, `/admin/` included. Unpublished ("coming soon") sites return a 503
+   with `Retry-After` and `X-Robots-Tag: noindex` to anonymous visitors; `/admin/` and signed-in
+   viewers bypass it, and `/sitemap.xml` + `/robots.txt` are answered before the gate.
 6. `Database::setSchema($tenant->schema_name)` — from here on, application code is
    single-tenant-shaped.
 
-The added cost vs. the single-tenant CMS is one cached DB lookup per request.
+The added cost vs. the single-tenant CMS is one cached DB lookup per request (a per-worker cache
+with a 60 s TTL, 128 entries, FIFO eviction).
+
+## One canonical URL per tenant
+
+A tenant with a custom domain is reachable on two hosts (the subdomain and the domain), and before
+the 2026-08 SEO work every absolute URL the app generated came from `SITE_URL`, which on a SaaS
+box is the apex. The fix is one resolver, used everywhere:
+
+- **`CanonicalHost`** picks the tenant's preferred host: the ACTIVE custom domain flagged
+  `is_canonical`, else `<handle>.<platform>`. Memoized per request, fails soft.
+- The flag is kept by `TenantDomain::transitionTo()`: the first non-www domain to reach ACTIVE
+  becomes canonical, and the flag clears when that domain leaves ACTIVE. Owners can choose a
+  different one at `/admin/domains/canonical.php`; a per-tenant partial unique index allows at
+  most one.
+- `PageMeta::baseUrl()` builds canonical and `og:url` tags from it on every host, with query
+  strings stripped. `redirect()` rewrites `SITE_URL`-prefixed targets onto the current tenant
+  host, and Stripe return URLs use the current host too.
+- The subdomain and custom domain deliberately **don't** 301 to each other; canonical tags carry
+  the preference, so a tenant whose domain lapses keeps a working subdomain with no redirect loop.
+- A shared `tenant_head()` partial emits meta, canonical, robots, the theme font request and
+  JSON-LD (`StructuredData`: WebSite, Organization, Product/Offer, Event, VisualArtwork,
+  BreadcrumbList, …) for the public tenant pages.
+- Each tenant gets its own `sitemap.xml` on its canonical host (the shop entry only when the plan
+  has `shop_links`), `robots.txt` advertises it, and an unpublished site's sitemap 404s. The apex
+  sitemap lists published ACTIVE/GRACE tenants.
+
+This is the one place the SEO work reached into inherited controllers: eleven public pages moved
+onto `tenant_head()`. Tenancy itself still never touches them.
 
 ## Custom domains
 
@@ -66,14 +111,16 @@ model `includes/TenantDomain.php`; verification in `includes/DomainVerifier.php`
 
 ### Setup flow
 
-1. Tenant adds `anniespots.com` (validated against the Public Suffix List; blocklisted lookalike/
-   popular domains rejected; hostname is **globally unique** across tenants — a domain pending for
-   another account is rejected at add time). Adding an apex auto-adds the `www.` sibling row.
+1. Tenant (OWNER role, plan with `allow_custom_domain`) adds `anniespots.com`. The platform domain
+   and its subdomains are refused; the hostname is **globally unique** across tenants, so a domain
+   pending for another account is rejected at add time. The Public Suffix List decides whether the
+   host is an apex, and adding an apex auto-adds the `www.` sibling row.
 2. Tenant configures two DNS records at their registrar:
    - `CNAME anniespots.com → tenants.makerfolio.art` (routing)
    - `TXT _makerfolio-verify.anniespots.com → <random token>` (ownership challenge)
 3. The `verify-pending-domains` cron (every 5 min) — or the manual "Verify" button — resolves both
-   via a public resolver; both correct → `DNS_VERIFIED`.
+   over DNS-over-HTTPS (Cloudflare, Google as fallback), which sidesteps the container resolver's
+   stale cache; both correct → `DNS_VERIFIED`.
 4. First HTTPS hit (or the monitoring cron's TLS probe) triggers Caddy on-demand issuance; the
    `monitor-provisioning-domains` cron drives the state forward using an SNI handshake probe
    (`includes/TlsCertProbe.php` — Caddy runs `admin off`, so cert presence is *observed*, not
@@ -90,27 +137,30 @@ stateDiagram-v2
     [*] --> PENDING_DNS : tenant adds domain
     PENDING_DNS --> DNS_VERIFIED : CNAME + TXT both correct
     PENDING_DNS --> FAILED_DNS : 7d of failed checks (cron)
-    DNS_VERIFIED --> CERT_PROVISIONING : Caddy asks /caddy-ask, starts issuance
+    DNS_VERIFIED --> CERT_PROVISIONING : /caddy-ask allows, or monitor cron
     CERT_PROVISIONING --> ACTIVE : TLS probe observes live cert
-    DNS_VERIFIED --> FAILED_CHALLENGE : ACME challenge failed
-    CERT_PROVISIONING --> FAILED_RATE_LIMIT : Let's Encrypt rate-limited
-    ACTIVE --> DISABLED : tenant disables / 3 renewal failures
+    CERT_PROVISIONING --> FAILED_CHALLENGE : no cert after 15 min
+    DNS_VERIFIED --> FAILED_RATE_LIMIT : reserved, no writer yet
+    ACTIVE --> DISABLED : tenant or operator disables
     FAILED_DNS --> PENDING_DNS : tenant re-verifies (new token)
     FAILED_CHALLENGE --> PENDING_DNS : tenant re-verifies
     FAILED_RATE_LIMIT --> PENDING_DNS : retry after cool-off
     DISABLED --> DNS_VERIFIED : re-enable (recent) — else back to PENDING_DNS
 ```
 
-All actors — the cron, `/caddy-ask`, the operator's manual retry button — funnel through the same
-`transitionTo()` so invalid jumps are impossible and every transition is audited.
+Every state can also move to `DISABLED`; `sweep-failed-domains` does that to rows left in a
+`FAILED_*` state for 60 days. All actors — the crons, `/caddy-ask`, the tenant's buttons, the
+operator's force-disable — funnel through the same `transitionTo()` so invalid jumps are
+impossible and every transition is audited.
 
 ## The `/caddy-ask` gate (invariant 7)
 
 Caddy's `on_demand_tls { ask … }` calls an internal-only endpoint before issuing any cert.
 It returns **200 only** for hostnames in `tenant_domains` with status
-`DNS_VERIFIED` / `CERT_PROVISIONING` / `ACTIVE`, **and** whose owning tenant is
-`ACTIVE`/`GRACE` or within the first 30 days of `SUSPENDED` (after that — and for
-`PENDING_DELETION`/`DELETED` — it 404s so Caddy stops renewing).
+`DNS_VERIFIED` / `CERT_PROVISIONING` / `ACTIVE` (plus the platform's own hosts), unless the owning
+tenant is `PENDING_DELETION`/`DELETED` or has been `SUSPENDED` for 30 days or more; then it 404s
+so Caddy stops renewing. A 200 for a `DNS_VERIFIED` row also moves it to `CERT_PROVISIONING`,
+which is why the endpoint had to become unreachable from outside (2026-08 audit, M4).
 
 This is the defense against an attacker pointing 10K domains at the platform IP to burn the
 Let's Encrypt rate limit: the only path into `DNS_VERIFIED` is completing a TXT ownership
@@ -121,4 +171,4 @@ tenants, so lapsed accounts don't consume rate-limit headroom indefinitely.
 
 The daily `cert-health-check` cron TLS-probes every ACTIVE custom domain, refreshes
 `cert_expires_at`, and surfaces certs older than 80 days / expiring within 14 days / failing the
-handshake in the platform-admin operator queue.
+handshake in the platform-admin operator queue. It reports; it never transitions a domain.

@@ -19,10 +19,12 @@ integrity across the boundary; denormalized copies are reconciled by helper + ni
 
 ### 3. Stripe state is webhook-driven; never optimistic local writes
 `subscriptions.local_status` and `tenants.plan_id` flip only on the enumerated webhook events,
-after an INSERT-first dedup row (`billing_events` / tenant `stripe_webhook_events`). Handler runs
-in a transaction; `processed_at` stamped after; mail after the transaction (Stripe's 10 s
-deadline). The two Stripe planes — platform subscriptions vs. per-tenant Connect shops — never
-cross.
+after an INSERT-first dedup row (`billing_events`; on the Connect plane, a
+`connect_webhook_events` claim plus the tenant's own `stripe_webhook_events`). The claim INSERT
+is autocommitted, never nested in an outer transaction (on Postgres a caught unique violation
+aborts the enclosing transaction). Handler runs in a transaction; `processed_at` stamped with or
+after it; mail after the transaction (Stripe's 10 s deadline). The two Stripe planes — platform
+subscriptions vs. per-tenant Connect shops — never cross.
 
 ### 4. State changes go through `transitionTo()` methods, not direct UPDATEs
 `Tenant::transitionTo()`, `TenantDomain::transitionTo()`, `ShopConnect::transitionTo()`,
@@ -44,7 +46,8 @@ tenant).
 
 ### 7. Custom-domain certs only issue for DNS-verified domains
 Caddy's on-demand TLS asks `/caddy-ask`, which 200s only for hostnames in `tenant_domains` with
-`DNS_VERIFIED`/`CERT_PROVISIONING`/`ACTIVE` **and** a live-enough owning tenant. This is the
+`DNS_VERIFIED`/`CERT_PROVISIONING`/`ACTIVE` **and** a live-enough owning tenant. The endpoint
+itself answers only Caddy's internal `Host: localhost` ask; the public vhosts 404 it. This is the
 guard against burning the Let's Encrypt rate limit with hostile domains pointed at the platform
 IP: reaching `DNS_VERIFIED` requires completing a TXT ownership challenge.
 
@@ -54,16 +57,17 @@ IP: reaching `DNS_VERIFIED` requires completing a TXT ownership challenge.
 |---|---|---|
 | Tenancy model | Postgres schema-per-tenant | Row-level `tenant_id` = one forgotten WHERE from a leak across ~100 framework-less controllers; ORM retrofit = bigger rewrite than the MySQL→Postgres port. Mirrors django-tenants pattern proven in the sibling project. |
 | Database | Postgres (SaaS only; upstream stays MySQL) | First-class schemas + `search_path`; transactional DDL makes provisioning atomic. MySQL "schema"=database makes backup/GRANTs per-database ugly. |
-| Edge | Caddy on-demand TLS | nginx+certbot needs per-domain config or restarts for runtime-added custom domains; Caddy issues off SNI with an app-controlled allowlist. |
+| Edge | Cloudflare in front of the platform hosts; Caddy on-demand TLS for custom domains | nginx+certbot needs per-domain config or restarts for runtime-added custom domains; Caddy issues off SNI with an app-controlled allowlist. A CF origin cert for the platform hosts replaced the planned DNS-01 wildcard. |
 | Keep the no-framework CMS shape | Yes — bootstrap-level middleware only | The point of schema-per-tenant is that application code stays single-tenant-shaped; controllers carry over unmodified from the fork base. |
 | Async work | Cron (supercronic), no queue/Redis | Everything needed is periodic; per-tenant isolation handled by the `for_each_tenant` loop pattern. Queue re-evaluated only if a feature needs reliable async. |
 | Sessions | Files → (at multi-VM scale) Postgres `UNLOGGED` table | Avoids operating Redis; session loss on crash = re-login, acceptable. |
-| Uploads | `Storage` interface, PHP-proxied, S3-compatible backend chosen by `.env` | Centralized validation/resize; vendor (R2/B2/S3) is an operator decision, not a code decision. Presigned direct upload deferred until scale demands. |
+| Uploads | `Storage` interface, PHP-proxied, S3-compatible backend chosen by `.env`; `TenantStorage` roots every key | Centralized validation/resize; vendor (R2/B2/S3) is an operator decision, not a code decision. Tenant key roots are assembled in one place so a flat or foreign key can't be written. Presigned direct upload deferred until scale demands. |
+| Backups | Nightly `pg_dump` + uploads rsync to an offsite box | One cron, no extra service. PITR and bucket versioning from the original design are not built; recovery point is the last nightly dump. |
 | Email | AWS SES; shared identity for Free/Pro, per-tenant DKIM identity for Studio | Tenant-scoped reputation where it matters; SNS bounce/complaint loop feeds suppression + identity failure guards. |
 | Payments | Stripe Billing (platform) + Stripe Connect direct charges (tenant shops) | Tenants' shop revenue must land on **their** account; platform fee is a plan column (`shop_application_fee_bps`, 0 today). |
-| Monetization | URL + brand, not feature gates | Competitive frame is Squarespace, not WordPress.com; the free tier is a real product and every free site is a billboard (footer link). |
+| Monetization | URL, brand and selling; four tiers held as data | Competitive frame is Squarespace, not WordPress.com; the free tier is a real product and every free site is a billboard (footer link, now with referral attribution). The shop splits into link-out (Basic) and own-site checkout (Pro). |
 | Scaling | Single VM, vertical, until ~10K tenants | Operational simplicity; the split (edge / app / managed PG) changes zero application code when it comes. |
-| Handle reuse | 90-day cooldown after release; renames redirect for 1 year first | Subdomain-takeover defense sized to third-party verification windows. |
+| Handle reuse | Designed: 90-day cooldown after release; renames redirect for 1 year | Subdomain-takeover defense sized to third-party verification windows. As built, the redirect works but the cooldown isn't enforced at signup (see open questions). |
 
 ## Genuinely open questions
 
@@ -77,3 +81,8 @@ Carried from the design docs — real, undecided, with documented leans:
   self-exemption inside the 1-year redirect window) — revisit on user complaints.
 - **Postgres hosting**: self-managed on the VM now; managed (RDS/Crunchy) when PITR/replica
   operations justify it.
+- **Handle cooldown enforcement**: deletion stamps `handle_released_at` 90 days out, but handle
+  lookups treat any non-NULL value as released, and signup doesn't check unexpired
+  `handle_redirects`. Either the check moves to "released and past the date" (and signup consults
+  redirects), or the design drops the cooldown. Open in the product.
+- **Per-tenant Postgres roles**: in the design as defense in depth; not built.

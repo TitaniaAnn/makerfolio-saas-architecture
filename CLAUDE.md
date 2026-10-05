@@ -17,7 +17,7 @@ vendor/bin/phpunit --filter WebhookDedupTest       # single class
 PG_DSN='pgsql:host=...;dbname=toy' vendor/bin/phpunit   # also run the Postgres search_path tests
 ```
 
-The suite must be green before committing code changes; the 3 `PgSearchPathTest` skips without `PG_DSN` are expected.
+The suite must be green before committing code changes; the 5 Postgres-only skips (`PgSearchPathTest`, `PgWebhookTransactionTest`) without `PG_DSN` are expected.
 
 ## Layout and the four-layer contract
 
@@ -34,13 +34,13 @@ Keep additions in the layer that matches their altitude. A new architectural dec
 
 - **The toy domain is generic notes/tags** — never makerfolio product vocabulary (`piece`, shop, plans). The cut demonstrates *patterns*; the walkthroughs point at the *product*.
 - **SQL stays portable** (SQLite + Postgres): TEXT ISO 8601 timestamps set by code, no auto-increment (SQLite auto-assigns `INTEGER PRIMARY KEY`; code-generate TEXT ids where Postgres must insert too), `ON CONFLICT DO NOTHING` for seeds, every statement idempotent and ending its line with `;` (the splitter's contract).
-- **Schema switching is Postgres-only by design** — `Database::setSchema` throws on other drivers. Dialect-agnostic contracts get SQLite tests; anything needing real `search_path` goes in `PgSearchPathTest` behind the `PG_DSN` skip.
+- **Schema switching is Postgres-only by design** — `Database::setSchema` throws on other drivers. Dialect-agnostic contracts get SQLite tests; anything needing real Postgres behaviour (`search_path`, transaction-abort semantics) goes in a `Pg*Test` class behind the `PG_DSN` skip.
 - **Test docstrings name the ARCHITECTURE.md section they verify** (§1, §3, §4, §6, §7). Keep the contract→test mapping traceable, same convention as the template repo.
 
 ## Conventions
 
 - **Links into the product repo are absolute GitHub URLs** (`https://github.com/TitaniaAnn/makerfolio-saas/blob/main/...`) — relative paths can't reach across repos. Links within this repo are relative.
-- **`code/` is a mirror.** The walkthroughs are copied from the product repo's `design-docs/walkthroughs/code/` with links rewritten; the provenance note at the top of `code/README.md` says the in-repo copy wins on drift. When refreshing, re-copy and re-run the link rewrite (`../../../` → product-repo blob URL; `../../` → `design-docs/`; `../` → `design-docs/walkthroughs/`) — don't hand-edit mirrored content.
+- **`code/` is a mirror.** The walkthroughs are copied from the product repo's `design-docs/walkthroughs/code/` with links rewritten; the provenance note at the top of `code/README.md` says the in-repo copy wins on drift. When refreshing, re-copy and re-run the link rewrite on link *targets* only — the `](…)` part, leaving link text alone (`../../../` → product-repo blob URL; `../../` → `design-docs/`; `../` → `design-docs/walkthroughs/`), then restore the provenance note and the "ARCHITECTURE.md in this repo" link at the top of `code/README.md` — don't hand-edit mirrored content.
 - **The product repo is the source of truth for facts.** When a doc here disagrees with `makerfolio-saas` code or its `design-docs/COMPLETION_MATRIX.md`, this repo is stale; fix it here. Never invent as-built claims — verify against the product repo first.
 - Line numbers in `code/` walkthroughs drift as the product changes; treat them as "look near here" (the walkthroughs' own README says this). Don't chase line-number drift in isolation — refresh the whole mirror.
 - Mermaid diagrams render on GitHub; keep them small enough to read without scrolling.
@@ -54,4 +54,4 @@ Keep additions in the layer that matches their altitude. A new architectural dec
 
 ## Currency
 
-Documents were written against the product repo at approximately PR #146 (2026-07). The as-built record there is `design-docs/COMPLETION_MATRIX.md` (last fully refreshed at PR #96; the git log is authoritative past that).
+Documents were written against the product repo at approximately PR #146 (2026-07) and refreshed against PR #191 (2026-10): Cloudflare origin cert, canonical hosts/SEO, `TenantStorage`, the shop links/checkout split and Basic tier, the 2026-08 security audit fixes, cron consolidation, nightly offsite backups. The as-built record there is `design-docs/COMPLETION_MATRIX.md` (last fully refreshed at PR #96; the git log is authoritative past that). Where the product's own design docs describe intent that wasn't built (PITR, per-tenant Postgres roles, the domain lookalike blocklist), the docs here say so.

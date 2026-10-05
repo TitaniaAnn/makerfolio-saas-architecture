@@ -18,7 +18,7 @@ in production at [makerfolio.art][mf].
 
 ```mermaid
 flowchart LR
-    V[Visitors / Makers] -->|HTTPS| C[Caddy 2\nTLS termination\non-demand certs]
+    V[Visitors / Makers] -->|"HTTPS (platform hosts\nvia Cloudflare)"| C[Caddy 2\nTLS termination\non-demand certs]
     C -->|FastCGI| F[PHP-FPM\nbootstrap.php\nTenantResolver]
     C -.->|"ask: may I issue\na cert for host X?"| ASK["/caddy-ask\ninternal endpoint"]
     F --> P[(Postgres 16\npublic schema +\none schema per tenant)]
@@ -26,7 +26,7 @@ flowchart LR
     F --> SES[AWS SES\noutbound mail]
     ST1[Stripe platform account\nsubscriptions] -->|webhooks| F
     ST2[Stripe Connect\nper-tenant shop accounts] -->|webhooks| F
-    CRON[supercronic\n~16 crons] --> F
+    CRON[supercronic\n18 crons] --> F
 ```
 
 One request, one tenant: `bootstrap.php` resolves the tenant from
@@ -76,7 +76,10 @@ tests/               # Verifies the contract claims in ARCHITECTURE.md
 ├── WebhookDedupTest.php          ← §4 dedup, crashed-mid-flight retry, mail-after-commit
 ├── StateMachineTest.php          ← §6 valid edges, audit rows, invalid jumps throw
 ├── CaddyAskTest.php              ← §7 the allowlist matrix incl. the 30-day cutoff
-└── PgSearchPathTest.php          ← §1 real-Postgres isolation (skips without PG_DSN)
+├── PgSearchPathTest.php          ← §1 real-Postgres isolation (skips without PG_DSN)
+└── PgWebhookTransactionTest.php  ← §4/§5 why the dedup claim is autocommitted
+                                    (Postgres aborts a txn on a caught error; skips
+                                    without PG_DSN)
 ```
 
 Three layers, three questions — plus proof: `ARCHITECTURE.md` answers
@@ -101,8 +104,9 @@ The architectural decisions documented in detail in
    [tests/PgSearchPathTest.php](tests/PgSearchPathTest.php))*
 
 2. **Fork the CMS; multi-tenancy lives in the bootstrap** — ~100
-   inherited controllers carry into the SaaS unmodified because
-   tenancy, edge, dialect, and storage changed underneath them.
+   inherited controllers carry into the SaaS without tenancy changes
+   because tenancy, edge, dialect, and storage changed underneath
+   them.
    *([§2][arch], [docs/01][d1])*
 
 3. **Idempotent per-tenant migrations with failure isolation** —
@@ -146,8 +150,9 @@ The architectural decisions documented in detail in
    *([§8][arch], [docs/06][d6], [code/02][c2])*
 
 9. **Boring operations** — one VM, cron not queue, heartbeat
-   dead-man's switch, swappable storage/mail/CDN seams; the split to
-   multiple VMs changes zero application code.
+   dead-man's switch, one nightly offsite backup, swappable
+   storage/mail/CDN seams; the split to multiple VMs changes zero
+   application code.
    *([§9][arch], [docs/07][d7])*
 
 ## Running the code
@@ -177,7 +182,11 @@ With Postgres it provisions two real tenant schemas (atomically —
 a failed provision is verified to leave nothing behind) and asserts
 the two halves of §1: the same unqualified query scoped per tenant,
 and the loud `relation does not exist` failure when the schema-set
-is forgotten.
+is forgotten. `tests/PgWebhookTransactionTest.php` runs against the
+same database and shows why the webhook dedup INSERT must stay
+outside any transaction: on Postgres a caught unique violation
+still aborts the enclosing transaction, which is the bug the
+product's Connect receiver shipped and then fixed.
 
 Reading the tests is a faster path into the architecture than
 reading the source top-down.
@@ -195,7 +204,7 @@ This is a reference architecture. It is deliberately missing:
   republished.
 - **The product's test suites.** Each ARCHITECTURE.md section ends
   with *Verified by*, naming the PHPUnit tests and smoke scripts in
-  the product repo (420+ tests, 45+ smokes) that pin that section's
+  the product repo (~650 tests, 47 smokes) that pin that section's
   contract against the real implementation. The tests here pin the
   same contracts against the toy cut.
 - **Operational secrets.** Deploy runbooks, incident playbooks, and

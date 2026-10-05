@@ -52,13 +52,19 @@ throws `relation "piece" does not exist`, loudly, on the first
 query. Loud failure instead of silent leak is the load-bearing
 security property of the whole design.
 
-Two supporting choices ride along. Tenant resolution results are
-cached per-worker (60 s LRU) so the added cost is one lookup per
-request. And per-tenant Postgres roles exist with USAGE only on
-their own schema — used for emergency DBA work and the support-login
-flow, *not* by the app's connection pool, because poolers don't
-reset roles on connection reuse without `DISCARD ALL`, which defeats
-prepared-statement caching.
+Tenant resolution results are cached per-worker (60 s TTL) so the
+added cost is one lookup per request. The design also called for
+per-tenant Postgres roles with USAGE only on their own schema, for
+emergency DBA work; they were never built, and the app pool runs as
+one role. They would stay out of the pool if added, because poolers
+don't reset roles on connection reuse without `DISCARD ALL`, which
+defeats prepared-statement caching.
+
+The same idea later reached object storage. Every upload key is
+rooted at `<tenant_id>/`, and a `TenantStorage` wrapper returned by
+`get_storage()` is the only code that assembles that root: a key
+rooted in another tenant's prefix throws, and an un-rooted key can't
+be written. A nightly cron asserts the bucket layout still holds.
 
 ### Why not the alternatives
 
@@ -90,14 +96,18 @@ tenants across database clusters (the tenant directory already maps
 tenant → schema, so it can map tenant → cluster + schema).
 
 Cross-tenant aggregate queries are deliberately awkward. The answer
-shipped is a nightly `usage_rollups` snapshot table in the public
-schema, so operator dashboards never scan tenant schemas live.
+shipped is rollup tables in the public schema (hourly
+`usage_rollups`, nightly `platform_metrics_daily`), so operator
+dashboards never scan tenant schemas live.
 
 ### Verified by
 
 `bin/tenant-isolation-smoke.php` in the product repo provisions two
 tenants and asserts neither can see the other's rows;
-`tests/TenantResolverTest.php` pins the host-classification logic.
+`tests/TenantResolverTest.php` pins host parsing, the apex-only
+paths, and the resolver cache (classification itself needs the DB
+and is covered by `bin/tenant-domain-routing-smoke.php`);
+`tests/TenantStorageTest.php` pins the storage key confinement.
 In this repo: [tests/PgSearchPathTest.php](tests/PgSearchPathTest.php)
 demonstrates the isolation + loud-failure claim against a real
 Postgres, and [tests/TenantResolverTest.php](tests/TenantResolverTest.php)
@@ -156,6 +166,13 @@ The cost is that upstream improvements arrive by manual port. The
 `$isSaaS` branch points (mailer senders, storage writers, backup
 page) are the places where the two products' behavior intentionally
 differs — each is small and grep-able.
+
+The unmodified-controllers rule held for tenancy, but not for
+everything. Host-correct SEO (one canonical URL per tenant across
+subdomain and custom domain, JSON-LD, per-tenant sitemaps) moved
+eleven public pages onto a shared `tenant_head()` partial. That's
+the pattern for future cross-cutting changes: put the behaviour in
+one partial or helper and touch each controller once to call it.
 
 ### Verified by
 
@@ -278,9 +295,16 @@ inherited from the CMS's shop webhook and reused verbatim:
    blow Stripe's 10-second delivery deadline and trigger spurious
    retries.
 
-A reconciliation cron (`stripe-dunning-sync`, every 15 min) sweeps
+A reconciliation cron (`stripe-dunning-sync`, hourly) sweeps
 tenants in the dunning window as a belt-and-braces backstop — it
 converges state, it never originates it.
+
+Step 1 has a rule that only shows up on Postgres: the dedup INSERT
+must run autocommitted, outside any transaction. The gate works by
+catching an expected unique violation on a retry, and Postgres
+aborts the enclosing transaction on any error, caught or not. The
+product's Connect receiver learned this the hard way (see decision
+5).
 
 ### Why not the alternatives
 
@@ -301,16 +325,30 @@ INSERT-first-ledger already solves at the database layer.
 
 The dedup ledger grows forever by design (it doubles as the billing
 audit trail); pruning policy is an operator decision, not code.
+Ledger rows also record `handler_result` (SUCCESS / IGNORED / FAILED)
+and the last error, so a handler that fails every time is visible on
+the operator's webhook board, not only in logs.
+
+Step 4 has one known leak on the platform plane. The webhook sends
+no mail of its own, but a GRACE → ACTIVE transition fires the
+"account restored" email from inside `Tenant::transitionTo()`, which
+runs inside the webhook's transaction. The send is wrapped so it
+can't roll anything back; it can still spend Stripe's deadline. The
+fix is the same as everywhere else: collect the mail and send it
+after commit.
 Stripe API version is explicitly pinned — an SDK upgrade and the
 pin get reviewed together (the product did exactly this across a
 four-major-version SDK bump with zero wire-shape change).
 
 ### Verified by
 
-`bin/billing-webhook-smoke.php` (dedup, crash-retry, out-of-order),
+`bin/billing-webhook-smoke.php` (dedup, crash-retry, upsert, and each
+handled event type),
 `tests/SubscriptionTest.php` (status mapping) in the product repo.
 In this repo: [tests/WebhookDedupTest.php](tests/WebhookDedupTest.php)
-(the full contract, including mail-only-after-commit). Walkthrough:
+(the full contract, including mail-only-after-commit) and
+[tests/PgWebhookTransactionTest.php](tests/PgWebhookTransactionTest.php)
+(why the claim must be autocommitted, on real Postgres). Walkthrough:
 [code/04-billing-platform-plane.md](code/04-billing-platform-plane.md).
 
 ---
@@ -341,12 +379,23 @@ Two fully separate planes that never cross:
   turning on a platform fee is a one-value edit, not a code change).
 
 Connect events arrive keyed by connected-account id with no Host
-header, so they can't be tenant-resolved by hostname: a single
-platform endpoint (`/platform-webhook/connect/`) resolves
-`acct_xxx → tenant` via a unique index, then `setSchema`, then runs
-the same INSERT-first dedup contract from decision 4 — with the
-dedup ledger in the *tenant's* schema, because shop events are
-tenant data.
+header, so they can't be tenant-resolved by hostname. A single
+platform endpoint (`/platform-webhook/connect/`) runs decision 4's
+contract in two layers. It first claims every event in
+`public.connect_webhook_events`, resolving `acct_xxx → tenant` via a
+unique index (unknown accounts are recorded as IGNORED rather than
+dropped). Then it dispatches: `account.updated` is one idempotent
+UPDATE on the tenant's public row, and shop payment events call
+`setSchema` and run the inherited INSERT-first dedup against the
+*tenant's* `stripe_webhook_events`, because shop events are tenant
+data.
+
+The dispatch used to sit inside an outer transaction. On Postgres
+that turned every retry into a permanent failure: the tenant-side
+dedup caught its expected unique violation, the outer transaction
+was already aborted, and the next SELECT failed, so the event 500'd
+and Stripe retried it forever. Each handler now owns its own
+atomicity, and the outer layer only claims and stamps.
 
 The consequence of the separation: a tenant losing their Connect
 onboarding cannot affect their subscription, and the platform
@@ -370,15 +419,23 @@ routing entirely. Connect exists to solve exactly this.
 
 `shop_application_fee_bps` is seeded 0 on every plan — the
 monetization lever exists but has never fired in production; the
-first non-zero value should get a deliberate rollout. Express
-accounts put more onboarding UX on the platform than Standard;
-both are supported, and the mix is a product decision the
+first non-zero value should get a deliberate rollout. Entitlement
+is split in two: `shop_links` (a link-out catalog, Basic and up)
+needs no Connect account at all, and only `shop_checkout` (Pro and
+up) touches this plane. The plan-flag reader is an exact allowlist,
+after a pattern-based reader silently closed every shop when the
+new flag names didn't match it.
+
+Express accounts put more onboarding UX on the platform than
+Standard; both are supported, and the mix is a product decision the
 architecture doesn't constrain.
 
 ### Verified by
 
 `tests/ShopConnectTest.php` (24 cases: status derivation, gating,
-fee math), `bin/connect-webhook-smoke.php`, and a live-verified
+fee math), `tests/PlanTest.php` (entitlement allowlist),
+`bin/connect-webhook-smoke.php`, `bin/shop-pro-gate-smoke.php`
+(links/checkout split per tier), and a live-verified
 connected-account checkout in the product repo. Walkthrough:
 [code/05-shop-connect-plane.md](code/05-shop-connect-plane.md).
 
@@ -409,8 +466,8 @@ is unrepresentable rather than merely discouraged.
 
 The tenant lifecycle
 (`PENDING_VERIFICATION → ACTIVE ⇄ GRACE → SUSPENDED →
-PENDING_DELETION → DELETED`, with a tombstone after DELETED for the
-90-day handle cooldown) and the eight-state domain machine are the
+PENDING_DELETION → DELETED`, with a tombstone row after DELETED)
+and the eight-state domain machine are the
 two big instances; Connect status and sender-identity status follow
 the same shape at smaller scale.
 
@@ -437,6 +494,18 @@ the audit row makes it visible, and effects are written to be safe
 to re-fire manually. If an effect ever becomes must-not-drop, the
 edge should enqueue-then-execute instead (there is no queue today;
 see decision 9).
+
+Edges can carry bookkeeping as well as effects. The domain machine
+keeps each tenant's canonical-host flag: the first domain to reach
+ACTIVE becomes canonical, and leaving ACTIVE clears it. Because
+every writer goes through `transitionTo()`, that rule lives in one
+place instead of in each cron and button.
+
+Not every planned edge has a writer. `FAILED_RATE_LIMIT` is a valid
+domain state, but nothing transitions into it yet. The tenant
+tombstone was meant to hold a released handle for 90 days, and the
+lookup that should enforce it treats any stamped row as released,
+so the cooldown doesn't hold. Both are open in the product.
 
 ### Verified by
 
@@ -468,9 +537,20 @@ internal-only app endpoint (`/caddy-ask`) whether the hostname is
 allowed. The endpoint returns 200 only for hostnames in
 `tenant_domains` whose status says DNS verification completed
 (`DNS_VERIFIED` / `CERT_PROVISIONING` / `ACTIVE`) **and** whose
-owning tenant is alive (ACTIVE/GRACE, or within the first 30 days
-of SUSPENDED — after that the 404 lets certs lapse, so lapsed
-accounts stop consuming rate-limit headroom).
+owning tenant isn't on its way out: PENDING_DELETION, DELETED, or
+SUSPENDED for 30 days or more get a 404, which lets certs lapse so
+lapsed accounts stop consuming rate-limit headroom. (The toy cut
+here expresses the tenant half as an allowlist of live statuses;
+the product writes it as a deny-list. The difference matters only
+for edge cases: the product also allows PENDING_VERIFICATION and a
+SUSPENDED row with no timestamp, which the toy refuses.)
+
+The ask endpoint is reachable only by Caddy: it answers only
+`Host: localhost` (an internal site inside the Caddy container) and
+both public vhosts 404 the path. That isn't just hygiene. A 200 for
+a `DNS_VERIFIED` domain also advances it to `CERT_PROVISIONING`, so
+a publicly reachable ask was both a domain-enumeration oracle and an
+unauthenticated state-machine nudge.
 
 The only path into `DNS_VERIFIED` is completing a TXT-record
 ownership challenge (`_makerfolio-verify.<host>`), which requires
@@ -489,8 +569,12 @@ active domains catches renewal failures.
 runtime-added domain; the operational cost this decision exists to
 eliminate.
 
-**A wildcard-only design** — covers `*.makerfolio.art` (and is used
-for it) but cannot cover customer-owned domains by definition.
+**A wildcard-only design** — covers `*.makerfolio.art` but cannot
+cover customer-owned domains by definition. (The platform hosts
+ended up behind Cloudflare with an origin certificate rather than
+the planned DNS-01 wildcard; custom domains bypass Cloudflare and
+hit Caddy directly, which requires the CNAME target customers use
+to be a DNS-only record.)
 
 **Cloudflare SaaS-for-SaaS managed certs** ($0.10/domain/mo) — the
 documented escape hatch if Let's Encrypt rate limits ever become
@@ -510,8 +594,9 @@ what makes that scenario contrived.
 
 `bin/caddy-ask-smoke.php` (allowlist matrix including the
 suspended-tenant cutoffs), `bin/tenant-domain-routing-smoke.php`,
-`tests/TenantDomainTest.php`, `tests/DomainVerifierTest.php` in the
-product repo. In this repo:
+`tests/TenantDomainTest.php`, `tests/DomainVerifierTest.php`,
+`tests/TenantResolverTest.php` (the localhost-only ask gate),
+`tests/CanonicalHostTest.php` in the product repo. In this repo:
 [tests/CaddyAskTest.php](tests/CaddyAskTest.php) (the same matrix,
 including 10-days-suspended → allow, 31 → refuse). Walkthrough:
 [code/10-custom-domains-tls.md](code/10-custom-domains-tls.md).
@@ -536,22 +621,29 @@ Three non-overlapping session keyspaces in one PHP session:
 `admin_id` (against the tenant schema's `admin_users` — ids are
 per-tenant and meaningless across tenants), and nothing at all for
 buyers. One browser can hold all three simultaneously without
-interaction. Session state is tenant-checked, so a cookie minted on
-one tenant's host is inert on another's.
+interaction. The session cookie is host-only, so a cookie minted on
+one tenant's host is never sent to another's; support sessions
+additionally re-check their tenant on every request.
 
 "Log in as tenant" is a first-class audited flow, not a shared
 password: starting one requires a free-text reason, creates a
 `support_sessions` row with a 1-hour expiry, writes a visible entry
 in the *tenant's own* activity log, banners every admin page red
 for the duration, and stamps `via_support=true` plus the operator's
-id on every write. The tenant can read exactly what support did and
+id on every write. Only superadmins can start one. The tenant can read exactly what support did and
 when. Support sessions never consume a tenant admin seat.
 
 The inherited per-tenant hardening (CSRF on every mutation,
-rate-limited logins, strict CSP with zero inline script/style,
-trusted-proxy-gated client IPs) carries over as contracts — decision
-2 means the SaaS inherits the CMS's security posture rather than
-re-deriving it.
+rate-limited logins, a CSP with no inline script and nonce-only
+inline style, trusted-proxy-gated client IPs) carries over as
+contracts — decision 2 means the SaaS inherits the CMS's security
+posture rather than re-deriving it.
+
+The 2026-08 audit found the hole in that reasoning: the
+operator console was SaaS-only code, so it inherited nothing, and
+its password and TOTP steps had no rate limit at all. Both now feed
+one per-IP counter, and TOTP codes can't be replayed inside their
+window on either keyspace.
 
 ### Why not the alternatives
 
@@ -582,8 +674,10 @@ keyspace, not an extension of any current one.
 ### Verified by
 
 `tests/SupportSessionTest.php`, `tests/RoleTest.php`,
-`tests/PlatformAuthTest.php`, `bin/support-session-smoke.php`,
-`bin/role-gates-smoke.php` in the product repo. Walkthrough:
+`tests/PlatformAuthTest.php`, `tests/TotpTest.php` (replay guard),
+`tests/AuthClientIpTest.php`, `bin/support-session-smoke.php`,
+`bin/role-gates-smoke.php`, `bin/platform-rate-limit-smoke.php` in
+the product repo. Walkthrough:
 [code/02-auth-and-security.md](code/02-auth-and-security.md).
 
 ---
@@ -602,8 +696,9 @@ refuse the rest.
 
 One Hetzner VM running Docker Compose: Caddy, PHP-FPM, Postgres,
 and a supercronic cron container. All async work is periodic crons
-(~16 of them: domain verification, cert probes, lifecycle sweeps,
-dunning sync, rollups, sender-identity sweeps), each iterating
+(18 of them on 6 schedule lines: domain verification, cert probes,
+lifecycle sweeps, dunning sync, rollups, sender-identity sweeps,
+the storage-layout check, the nightly offsite backup), each iterating
 tenants with the same per-tenant isolation as the migration runner.
 There is no queue, no Redis, no worker tier.
 
@@ -613,7 +708,8 @@ heartbeat wrapper recording into a `cron_runs` table, surfaced as a
 dead-man's-switch board in the operator UI, alongside webhook
 ledgers with stuck-event drill-ins, an outbound-mail ledger,
 `/healthz` + Docker healthchecks, and a daily operator digest
-email. State-changing sweeps write what they did to the audit log,
+email. A unit test parses the crontab and fails if any schedule
+drifts from the heartbeat board's expected intervals. State-changing sweeps write what they did to the audit log,
 so "what did last night's sweep do" is an admin-UI question, not an
 SSH question.
 
@@ -651,10 +747,19 @@ file-backed on the single VM; the designed evolution is a Postgres
 Postgres itself is the real scaling boundary, and "move to managed
 Postgres" is the documented first split.
 
+Backups are the clearest place where "boring" was taken further
+than the design. The plan was 6-hourly dumps plus WAL/PITR and
+bucket versioning; what shipped is one nightly cron that `pg_dump`s
+the whole database and rsyncs uploads (without `--delete`, so a
+mass deletion can't propagate) to an offsite box. The recovery point
+is a day, and that's a known, written-down trade.
+
 ### Verified by
 
-`bin/cron/*-smoke.php` per lifecycle cron, `bin/heartbeat-smoke.php`,
+`bin/cron/*-smoke.php` per lifecycle cron, `bin/cron/heartbeat-smoke.php`,
+`tests/CronHeartbeatTest.php` (crontab ↔ heartbeat lockstep),
 `tests/StorageTest.php` (backend contract parity),
+`tests/TenantStorageTest.php`, `tests/UploadsTreeTest.php`,
 `bin/storage-smoke.php` in the product repo. Walkthrough:
 [code/06](code/06-email-deliverability.md),
 [code/08](code/08-uploads-storage-images.md), and
