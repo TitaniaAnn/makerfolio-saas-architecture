@@ -91,8 +91,9 @@ audited**:
 ## Certificate & domain abuse
 
 Covered in [03-routing-and-tls.md](03-routing-and-tls.md): the `/caddy-ask` allowlist (invariant
-7) means cert issuance requires a completed DNS TXT ownership challenge, and cert renewal stops
-for long-suspended/deleted tenants.
+7) means cert issuance requires a verified `tenant_domains` row, which only a tenant OWNER on a
+plan with `allow_custom_domain` can create and only a completed DNS TXT challenge can verify; cert
+renewal stops for long-suspended/deleted tenants.
 
 ## Content / mail / phishing abuse
 

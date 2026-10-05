@@ -522,12 +522,14 @@ Walkthroughs: [code/03](code/03-signup-and-provisioning.md),
 
 ### The problem
 
-Pro tenants bring custom domains at runtime. Each needs a
+Paying tenants bring custom domains at runtime. Each needs a
 certificate, issued without an operator touching config, renewed
-forever, and — critically — *not* issuable by strangers: anyone can
-point a domain's DNS at the platform's IP, and an attacker who
-points ten thousand at it can burn the Let's Encrypt rate limits
-for everyone.
+forever, and — critically — *not* issuable by strangers. On-demand
+issuance means any hostname that reaches the box in SNI could start
+an ACME order, and every order, valid or junk, spends the platform
+ACME account's **New Orders per Account** budget at Let's Encrypt.
+Exhaust that and real customers' first certificates and renewals
+stop until it refills.
 
 ### The decision
 
@@ -552,10 +554,22 @@ a `DNS_VERIFIED` domain also advances it to `CERT_PROVISIONING`, so
 a publicly reachable ask was both a domain-enumeration oracle and an
 unauthenticated state-machine nudge.
 
-The only path into `DNS_VERIFIED` is completing a TXT-record
-ownership challenge (`_makerfolio-verify.<host>`), which requires
-controlling the domain's DNS — the one thing the attacker with a
-pointed CNAME doesn't have.
+The real gate is that row. A `tenant_domains` row is created only
+through the tenant admin, by an OWNER on a plan with
+`allow_custom_domain`, so getting a hostname through the gate costs
+an attacker a paid account, not a DNS change. The TXT-record
+challenge (`_makerfolio-verify.<host>`) does a narrower job: it
+proves the account that added the row controls the domain's DNS, so
+one tenant can't claim another's hostname and spend orders on it.
+The plan is checked when the row is created, not at ask time, so a
+downgraded tenant's verified domains keep renewing (and keep
+routing) until the tenant itself lapses; that contradicts the
+pricing page's downgrade promise and is open in the product.
+
+(The per-domain limit people usually quote, **New Certificates per
+Registered Domain**, isn't the platform's exposure: it's keyed on
+each certificate's own registered domain, so junk domains each have
+their own budget and a customer's budget is theirs.)
 
 Because Caddy runs with its admin API off, cert issuance progress
 is *observed*, not queried: a monitoring cron performs an SNI
@@ -790,9 +804,11 @@ architecture, not the product. The controllers, the platform-admin
 UI, the marketing site, the runbooks' operational details, and the
 tests themselves live in the product repo — every "Verified by"
 above names the specific test or smoke there, and every walkthrough
-in [code/](code/) cites `file:line` into it, so the claims are
-checkable against source even though the source isn't republished
-here. Where a decision was resolved differently than designed, the
+in [code/](code/) cites `file:line` into it. Those references are
+plain text because the product repo is private: they let anyone with
+access check a claim against the real source, and they tell everyone
+else exactly where it lives. The contracts themselves are checkable
+by anyone through the toy cut in `src/` and `tests/`. Where a decision was resolved differently than designed, the
 docs say so (the [docs/08-invariants.md](docs/08-invariants.md)
 open-questions list tracks the live ones).
 

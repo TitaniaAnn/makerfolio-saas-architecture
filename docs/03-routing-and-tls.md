@@ -137,21 +137,40 @@ stateDiagram-v2
     [*] --> PENDING_DNS : tenant adds domain
     PENDING_DNS --> DNS_VERIFIED : CNAME + TXT both correct
     PENDING_DNS --> FAILED_DNS : 7d of failed checks (cron)
+    PENDING_DNS --> DISABLED : disabled
     DNS_VERIFIED --> CERT_PROVISIONING : /caddy-ask allows, or monitor cron
+    DNS_VERIFIED --> FAILED_CHALLENGE : allowed, no writer yet
+    DNS_VERIFIED --> FAILED_RATE_LIMIT : allowed, no writer yet
+    DNS_VERIFIED --> DISABLED : disabled
     CERT_PROVISIONING --> ACTIVE : TLS probe observes live cert
     CERT_PROVISIONING --> FAILED_CHALLENGE : no cert after 15 min
-    DNS_VERIFIED --> FAILED_RATE_LIMIT : reserved, no writer yet
+    CERT_PROVISIONING --> DISABLED : disabled
     ACTIVE --> DISABLED : tenant or operator disables
-    FAILED_DNS --> PENDING_DNS : tenant re-verifies (new token)
-    FAILED_CHALLENGE --> PENDING_DNS : tenant re-verifies
-    FAILED_RATE_LIMIT --> PENDING_DNS : retry after cool-off
-    DISABLED --> DNS_VERIFIED : re-enable (recent) — else back to PENDING_DNS
+    FAILED_DNS --> PENDING_DNS : restart (new token)
+    FAILED_DNS --> DISABLED : 60d sweep, or disabled
+    FAILED_CHALLENGE --> PENDING_DNS : restart (new token)
+    FAILED_CHALLENGE --> DISABLED : 60d sweep, or disabled
+    FAILED_RATE_LIMIT --> PENDING_DNS : restart (new token)
+    FAILED_RATE_LIMIT --> DISABLED : 60d sweep, or disabled
+    DISABLED --> PENDING_DNS : re-enable + re-verify (new token)
 ```
 
-Every state can also move to `DISABLED`; `sweep-failed-domains` does that to rows left in a
-`FAILED_*` state for 60 days. All actors — the crons, `/caddy-ask`, the tenant's buttons, the
-operator's force-disable — funnel through the same `transitionTo()` so invalid jumps are
-impossible and every transition is audited.
+The diagram is the edge map in [`src/TenantDomain.php`](../src/TenantDomain.php), edge for edge;
+[`tests/DomainDiagramTest.php`](../tests/DomainDiagramTest.php) parses this block and fails if
+the two drift. "Disabled" means the tenant's disable button or the operator's force-disable;
+`sweep-failed-domains` also disables rows left in a `FAILED_*` state for 60 days. Re-entry from
+`DISABLED` or any `FAILED_*` state always goes through `PENDING_DNS`, with a rotated verification
+token and a fresh DNS check; there is no shortcut back to `DNS_VERIFIED` or `ACTIVE`.
+
+Two notes against the product. Its map matches this one except that it still allows
+`DISABLED → DNS_VERIFIED`; the tenant UI never offers that edge (its only re-enable button is the
+`PENDING_DNS` restart), so this repo treats it as unintended. And the two `DNS_VERIFIED → FAILED_*`
+edges are allowed but nothing writes them yet; challenge failures are detected by the 15-minute
+timeout in `CERT_PROVISIONING`.
+
+All actors — the crons, `/caddy-ask`, the tenant's buttons, the operator's force-disable — funnel
+through the same `transitionTo()` so invalid jumps are impossible and every transition is
+audited.
 
 ## The `/caddy-ask` gate (invariant 7)
 
@@ -162,10 +181,22 @@ tenant is `PENDING_DELETION`/`DELETED` or has been `SUSPENDED` for 30 days or mo
 so Caddy stops renewing. A 200 for a `DNS_VERIFIED` row also moves it to `CERT_PROVISIONING`,
 which is why the endpoint had to become unreachable from outside (2026-08 audit, M4).
 
-This is the defense against an attacker pointing 10K domains at the platform IP to burn the
-Let's Encrypt rate limit: the only path into `DNS_VERIFIED` is completing a TXT ownership
-challenge, which requires controlling the domain's DNS. Cert lifetime is also tied to paying/live
-tenants, so lapsed accounts don't consume rate-limit headroom indefinitely.
+This is the defense against hostile hostnames burning the platform's Let's Encrypt budget.
+Without the gate, every SNI hostname would start an ACME order on the platform's one ACME
+account. Every order counts against Let's Encrypt's **New Orders per Account** limit whether it
+validates or not, so junk orders crowd out real customers' issuance and renewals. Names that don't
+resolve to the platform also fail validation and run up the per-identifier authorization-failure
+limits. (**New Certificates per Registered Domain** is keyed on each customer's own registered
+domain, so it isn't a shared platform budget.)
+
+What the gate actually requires is a `tenant_domains` row in a verified state. Rows are only
+created through `/admin/domains/`, which needs the OWNER role on a plan with
+`allow_custom_domain`, so each hostname costs an attacker a paid account rather than a DNS
+change. The TXT challenge then proves the account that added the row controls the domain, so one
+tenant can't claim another's hostname. Two caveats on how far this goes: the plan is checked
+when the row is created and never again (a downgraded tenant's verified domains keep getting
+certs and keep routing), and cert lifetime is tied to the tenant's lifecycle status, so lapsed
+accounts stop consuming headroom 30 days into suspension.
 
 ## Cert health monitoring
 

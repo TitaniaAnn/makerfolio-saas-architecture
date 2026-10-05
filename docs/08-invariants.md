@@ -48,8 +48,10 @@ tenant).
 Caddy's on-demand TLS asks `/caddy-ask`, which 200s only for hostnames in `tenant_domains` with
 `DNS_VERIFIED`/`CERT_PROVISIONING`/`ACTIVE` **and** a live-enough owning tenant. The endpoint
 itself answers only Caddy's internal `Host: localhost` ask; the public vhosts 404 it. This is the
-guard against burning the Let's Encrypt rate limit with hostile domains pointed at the platform
-IP: reaching `DNS_VERIFIED` requires completing a TXT ownership challenge.
+guard against spending the platform ACME account's Let's Encrypt order budget on hostile
+hostnames: a row only exists if a tenant OWNER on a plan with `allow_custom_domain` added it, and
+it only reaches `DNS_VERIFIED` once that account proves DNS control with a TXT challenge. The plan
+is checked at creation, not at ask time.
 
 ## Key decisions (ADR-style summary)
 

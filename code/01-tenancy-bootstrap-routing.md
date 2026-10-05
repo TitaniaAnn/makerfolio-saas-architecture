@@ -3,20 +3,20 @@
 **Audience:** developers working on makerfolio-saas.
 **Scope:** the "fork layer" — how an unmodified single-tenant controller ends up serving the right tenant's data.
 
-> Every web request requires `includes/bootstrap.php`, which at its tail calls `TenantResolver::resolve()`. The resolver maps the Host header to a tenant schema and calls `Database::setSchema()` (`SET search_path TO "<schema>", public`) before any controller query runs. Schema-per-tenant means the inherited controllers stay single-tenant-shaped: `SELECT * FROM piece` transparently hits `tenant_<id>.piece`. A forgotten `setSchema` fails loud (`relation does not exist`), never silently leaks another tenant's rows — that loud-failure property is the load-bearing security argument (see [ARCHITECTURE.md §1](https://github.com/TitaniaAnn/makerfolio-saas/blob/main/design-docs/ARCHITECTURE.md)).
+> Every web request requires `includes/bootstrap.php`, which at its tail calls `TenantResolver::resolve()`. The resolver maps the Host header to a tenant schema and calls `Database::setSchema()` (`SET search_path TO "<schema>", public`) before any controller query runs. Schema-per-tenant means the inherited controllers stay single-tenant-shaped: `SELECT * FROM piece` transparently hits `tenant_<id>.piece`. A forgotten `setSchema` fails loud (`relation does not exist`), never silently leaks another tenant's rows — that loud-failure property is the load-bearing security argument (see `ARCHITECTURE.md §1`).
 
 ## Map — the files
 | File | Role |
 | --- | --- |
-| [`Caddyfile`](https://github.com/TitaniaAnn/makerfolio-saas/blob/main/Caddyfile) / [`Caddyfile.prod`](https://github.com/TitaniaAnn/makerfolio-saas/blob/main/Caddyfile.prod) | Front edge. Clean-URL `try_files`, security backstops, on-demand-TLS `ask` gate. Falls through to `/_apex-router.php`. |
-| [`public/_apex-router.php`](https://github.com/TitaniaAnn/makerfolio-saas/blob/main/public/_apex-router.php) | Fallback entry for any path with no physical `*.php` at the doc root. |
-| [`public/index.php`](https://github.com/TitaniaAnn/makerfolio-saas/blob/main/public/index.php) | Example inherited controller: requires bootstrap, then queries `piece`/`events`/… unqualified. |
-| [`includes/bootstrap.php`](https://github.com/TitaniaAnn/makerfolio-saas/blob/main/includes/bootstrap.php) | Autoload → `.env` → config → core classes → `Auth::start()` → hardening headers → `.php`-strip redirect → `TenantResolver::resolve()`. |
-| [`includes/TenantResolver.php`](https://github.com/TitaniaAnn/makerfolio-saas/blob/main/includes/TenantResolver.php) | Host → tenant/marketing/404/suspended/redirect decision; per-worker LRU; `setSchema`; minimal error renderers. |
-| [`includes/Tenant.php`](https://github.com/TitaniaAnn/makerfolio-saas/blob/main/includes/Tenant.php) | `findByHandle`, `isReservedHandle`, `active`, `provision`, `transitionTo`. |
-| [`includes/Database.php`](https://github.com/TitaniaAnn/makerfolio-saas/blob/main/includes/Database.php) | PDO singleton; `setSchema` / `resetSchema` (search_path). |
-| [`includes/SaaSUrl.php`](https://github.com/TitaniaAnn/makerfolio-saas/blob/main/includes/SaaSUrl.php) | Build apex/tenant URLs; `redirectTarget` keeps `SITE_URL`-prefixed redirects on the current host. |
-| [`public/caddy-ask/index.php`](https://github.com/TitaniaAnn/makerfolio-saas/blob/main/public/caddy-ask/index.php) | On-demand-TLS allowlist endpoint (detail in `10-custom-domains-tls.md`). |
+| `Caddyfile` / `Caddyfile.prod` | Front edge. Clean-URL `try_files`, security backstops, on-demand-TLS `ask` gate. Falls through to `/_apex-router.php`. |
+| `public/_apex-router.php` | Fallback entry for any path with no physical `*.php` at the doc root. |
+| `public/index.php` | Example inherited controller: requires bootstrap, then queries `piece`/`events`/… unqualified. |
+| `includes/bootstrap.php` | Autoload → `.env` → config → core classes → `Auth::start()` → hardening headers → `.php`-strip redirect → `TenantResolver::resolve()`. |
+| `includes/TenantResolver.php` | Host → tenant/marketing/404/suspended/redirect decision; per-worker LRU; `setSchema`; minimal error renderers. |
+| `includes/Tenant.php` | `findByHandle`, `isReservedHandle`, `active`, `provision`, `transitionTo`. |
+| `includes/Database.php` | PDO singleton; `setSchema` / `resetSchema` (search_path). |
+| `includes/SaaSUrl.php` | Build apex/tenant URLs; `redirectTarget` keeps `SITE_URL`-prefixed redirects on the current host. |
+| `public/caddy-ask/index.php` | On-demand-TLS allowlist endpoint (detail in `10-custom-domains-tls.md`). |
 
 ## The flow
 A request to `annie.makerfolio.art/portfolio`:
@@ -49,12 +49,12 @@ A request to `annie.makerfolio.art/portfolio`:
 - **`.env` loads before `config.php`.** Config reads `$_ENV` at constant-definition time; CLI scripts must replicate the order (`bootstrap.php:12-19`; see `bin/tenant-isolation-smoke.php:19-24`).
 
 ## Tests & verification
-- [`bin/tenant-isolation-smoke.php`](https://github.com/TitaniaAnn/makerfolio-saas/blob/main/bin/tenant-isolation-smoke.php) — the core proof: writes a probe in `cynthia`, asserts `annie` sees zero rows, and that an unqualified query with no `setSchema` fails loud (`42P01`). Then drives `resolve()` with a tenant Host and asserts `search_path` includes the right schema. Pgsql-only; run inside the web container.
-- [`tests/TenantResolverTest.php`](https://github.com/TitaniaAnn/makerfolio-saas/blob/main/tests/TenantResolverTest.php) — pure pieces via reflection: host parsing (port strip, IPv6 brackets), `isApexOnlyPath`, LRU TTL/cap. DB- and exit-crossing branches are deliberately out of unit scope.
-- [`bin/tenant-domain-routing-smoke.php`](https://github.com/TitaniaAnn/makerfolio-saas/blob/main/bin/tenant-domain-routing-smoke.php), [`bin/marketing-smoke.php`](https://github.com/TitaniaAnn/makerfolio-saas/blob/main/bin/marketing-smoke.php), [`bin/caddy-ask-smoke.php`](https://github.com/TitaniaAnn/makerfolio-saas/blob/main/bin/caddy-ask-smoke.php) — custom-domain routing, apex marketing dispatch, and the cert gate end-to-end.
+- `bin/tenant-isolation-smoke.php` — the core proof: writes a probe in `cynthia`, asserts `annie` sees zero rows, and that an unqualified query with no `setSchema` fails loud (`42P01`). Then drives `resolve()` with a tenant Host and asserts `search_path` includes the right schema. Pgsql-only; run inside the web container.
+- `tests/TenantResolverTest.php` — pure pieces via reflection: host parsing (port strip, IPv6 brackets), `isApexOnlyPath`, LRU TTL/cap. DB- and exit-crossing branches are deliberately out of unit scope.
+- `bin/tenant-domain-routing-smoke.php`, `bin/marketing-smoke.php`, `bin/caddy-ask-smoke.php` — custom-domain routing, apex marketing dispatch, and the cert gate end-to-end.
 
 ## See also
 - [`02-auth-and-security.md`](./02-auth-and-security.md) — the three auth keyspaces, CSRF, hardening headers, support sessions.
 - [`09-migrations.md`](./09-migrations.md) — per-tenant idempotent migrations and `PlatformMigrationRunner`.
 - [`10-custom-domains-tls.md`](./10-custom-domains-tls.md) — `tenant_domains` state machine and the `/caddy-ask` gate.
-- [design-docs/ARCHITECTURE.md](https://github.com/TitaniaAnn/makerfolio-saas/blob/main/design-docs/ARCHITECTURE.md) §1–2 (tenancy + routing), §6 (security architecture).
+- `design-docs/ARCHITECTURE.md` §1–2 (tenancy + routing), §6 (security architecture).

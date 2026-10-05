@@ -130,7 +130,10 @@ Caps are enforced **at write time in app code**, not by constraint:
   stay open so an in-flight order survives a downgrade. The old `allow_shop` column survives only
   as a fail-safe alias equal to `shop_checkout`; nothing reads it.
 - **Downgrades never delete data**: excess pieces stay visible; the admin just can't create more
-  until they delete down or re-upgrade. Custom domains stop renewing (via the `/caddy-ask`
-  tenant-status check); the subdomain keeps working.
+  until they delete down or re-upgrade. Custom domains are the exception to "the plan is
+  enforced": `allow_custom_domain` gates adding a domain, but neither the resolver nor
+  `/caddy-ask` re-checks it, so a downgraded tenant's verified domains keep routing and renewing.
+  The pricing page promises they stop; that gap is open in the product. Certs do stop for
+  tenants that lapse (30 days suspended, or deletion).
 - Footer branding is a pure policy function (`Branding::footerMode()`): license byline
   (self-host), "Powered by makerfolio" (Free), none (Pro/Studio with the flag).
