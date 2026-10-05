@@ -7,8 +7,8 @@ turning an existing single-tenant PHP CMS into a SaaS without
 rewriting its controllers.
 
 This repository is **not** the product. It is the architecture:
-the decisions, the reasons, and the maps into the (private) product
-codebase that make the claims checkable. The product is PHP 8
+the decisions, the reasons, and `file:line` maps into the (private)
+product codebase. The product is PHP 8
 server-rendered with no framework, Postgres schema-per-tenant,
 Caddy + PHP-FPM on Docker, one Hetzner VM, Stripe Billing +
 Stripe Connect, AWS SES, and S3-compatible object storage — live
@@ -53,6 +53,7 @@ code/                # Developer walkthroughs (the WHERE in the source)
 ├── 01-tenancy-bootstrap-routing.md   … 10-custom-domains-tls.md
 └── README.md        ← one walkthrough per subsystem, each grounded in
                         file:line references into the product repo
+                        (plain text: that repo is private)
 
 src/                 # The load-bearing contracts, runnable, in a toy domain
 ├── Database.php                  ← PDO wrapper; setSchema/resetSchema (search_path)
@@ -198,10 +199,13 @@ This is a reference architecture. It is deliberately missing:
 - **The product source.** Controllers, admin UI, marketing site,
   platform-admin console — the code lives in the product repo. The
   `src/` cut is a from-scratch expression of the *patterns* in a
-  generic notes domain, not extracted product code; the
+  generic notes domain, not extracted product code. The
   [code/](code/README.md) walkthroughs cite `file:line` into the
-  real source, so every claim is checkable without the source being
-  republished.
+  real source as plain text, not links: the product repo is
+  private, so those references are exact pointers for anyone with
+  access, not something a public reader can click through. What a
+  public reader *can* check is the toy cut: `src/` + `tests/`
+  implement the same contracts and run with `composer test`.
 - **The product's test suites.** Each ARCHITECTURE.md section ends
   with *Verified by*, naming the PHPUnit tests and smoke scripts in
   the product repo (~650 tests, 47 smokes) that pin that section's

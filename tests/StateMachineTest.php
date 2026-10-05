@@ -111,8 +111,36 @@ final class StateMachineTest extends TestCase
         TenantDomain::transitionTo($this->db, 10, TenantDomain::DISABLED, 'tenant disabled');
 
         $this->expectException(DomainException::class);
-        // Re-enable must go back through DNS_VERIFIED / PENDING_DNS.
+        // Re-enable must go back through PENDING_DNS.
         TenantDomain::transitionTo($this->db, 10, TenantDomain::ACTIVE, 'shortcut');
+    }
+
+    public function test_disabled_domain_reenters_only_via_pending_dns(): void
+    {
+        TenantDomain::transitionTo($this->db, 10, TenantDomain::DNS_VERIFIED, 'verified');
+        TenantDomain::transitionTo($this->db, 10, TenantDomain::DISABLED, 'tenant disabled');
+
+        try {
+            // No skipping re-verification: DISABLED -> DNS_VERIFIED is not an edge.
+            TenantDomain::transitionTo($this->db, 10, TenantDomain::DNS_VERIFIED, 'old token still in DNS');
+            self::fail('expected DomainException');
+        } catch (DomainException) {
+        }
+        $row = $this->db->fetchOne('SELECT status FROM tenant_domains WHERE id = ?', [10]);
+        self::assertSame(TenantDomain::DISABLED, $row['status']);
+
+        $d = TenantDomain::transitionTo($this->db, 10, TenantDomain::PENDING_DNS, 're-enable + re-verify');
+        self::assertSame(TenantDomain::PENDING_DNS, $d['status']);
+    }
+
+    public function test_provisioning_domain_can_be_disabled_but_not_rate_limited(): void
+    {
+        TenantDomain::transitionTo($this->db, 10, TenantDomain::DNS_VERIFIED, 'verified');
+        TenantDomain::transitionTo($this->db, 10, TenantDomain::CERT_PROVISIONING, 'caddy asked');
+
+        self::assertFalse(TenantDomain::canTransition(TenantDomain::CERT_PROVISIONING, TenantDomain::FAILED_RATE_LIMIT));
+        $d = TenantDomain::transitionTo($this->db, 10, TenantDomain::DISABLED, 'operator force-disable');
+        self::assertSame(TenantDomain::DISABLED, $d['status']);
     }
 
     public function test_failed_domain_reenters_via_pending_dns(): void

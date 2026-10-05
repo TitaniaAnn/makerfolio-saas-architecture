@@ -1,9 +1,10 @@
 # Code Walkthroughs (developer)
 
-> Mirrored from `design-docs/walkthroughs/code/` in the
-> [`makerfolio-saas`](https://github.com/TitaniaAnn/makerfolio-saas) repo, with relative links
-> rewritten to absolute GitHub URLs. The in-repo copy alongside the source is the living one;
-> if the two drift, it wins.
+> Mirrored from `design-docs/walkthroughs/code/` in the `makerfolio-saas` product repo. That
+> repo is **private**, so references into it are plain-text `path:line` pointers rather than
+> links: exact for anyone with access, but not clickable from here. Links to files in this
+> public repo stay links. The in-repo copy alongside the product source is the living one; if the
+> two drift, it wins.
 
 How the makerfolio-saas codebase **works** — one walkthrough per subsystem, each grounded
 in real `file:line` references so you can read the doc with the source open beside it.
@@ -11,13 +12,13 @@ in real `file:line` references so you can read the doc with the source open besi
 These are *developer* docs (how the code is built). For *usage* guides (how to drive the
 running app) see the sibling sets:
 
-- **Platform-admin operator** runbooks — [`../README.md`](https://github.com/TitaniaAnn/makerfolio-saas/blob/main/design-docs/walkthroughs/README.md)
-- **Tenant owner** UI — [`../tenant/README.md`](https://github.com/TitaniaAnn/makerfolio-saas/blob/main/design-docs/walkthroughs/tenant/README.md)
-- **Public visitor** pages — [`../visitor/README.md`](https://github.com/TitaniaAnn/makerfolio-saas/blob/main/design-docs/walkthroughs/visitor/README.md)
+- **Platform-admin operator** runbooks — `design-docs/walkthroughs/README.md`
+- **Tenant owner** UI — `design-docs/walkthroughs/tenant/README.md`
+- **Public visitor** pages — `design-docs/walkthroughs/visitor/README.md`
 
-For the *why* behind the architecture, [ARCHITECTURE.md in this repo](../ARCHITECTURE.md),
-[ARCHITECTURE.md](https://github.com/TitaniaAnn/makerfolio-saas/blob/main/design-docs/ARCHITECTURE.md) and the SaaS
-invariants in [CLAUDE.md](https://github.com/TitaniaAnn/makerfolio-saas/blob/main/CLAUDE.md); for data shapes, [MODELS.md](https://github.com/TitaniaAnn/makerfolio-saas/blob/main/design-docs/MODELS.md) wins.
+For the *why* behind the architecture, read [ARCHITECTURE.md in this repo](../ARCHITECTURE.md);
+in the product repo, `design-docs/ARCHITECTURE.md` and the SaaS invariants in its `CLAUDE.md`.
+For data shapes, the product's `design-docs/MODELS.md` wins.
 
 ## The walkthroughs
 

@@ -10,10 +10,17 @@ namespace MakerfolioArch;
  * Every actor — the DNS-verification cron, the TLS probe that observes
  * cert issuance, the operator's retry button, the tenant's disable
  * toggle — funnels through transitionTo(). The edge map encodes the
- * rules that matter: nothing reaches ACTIVE except through
- * CERT_PROVISIONING, nothing re-enters the pipeline from FAILED_* or
- * DISABLED except by re-verification, and there is no DISABLED→ACTIVE
- * shortcut.
+ * rules that matter:
+ *
+ *  - nothing reaches ACTIVE except through CERT_PROVISIONING;
+ *  - every other state can move to DISABLED (tenant or operator
+ *    action, or the sweep that retires stale FAILED_* rows);
+ *  - nothing re-enters the pipeline from FAILED_* or DISABLED except
+ *    through PENDING_DNS, i.e. a fresh token and a fresh DNS check.
+ *    There is no DISABLED→DNS_VERIFIED or DISABLED→ACTIVE shortcut.
+ *
+ * docs/03-routing-and-tls.md draws this map; DomainDiagramTest keeps the
+ * diagram and TRANSITIONS identical.
  */
 final class TenantDomain
 {
@@ -29,13 +36,19 @@ final class TenantDomain
     private const TRANSITIONS = [
         self::PENDING_DNS       => [self::DNS_VERIFIED, self::FAILED_DNS, self::DISABLED],
         self::DNS_VERIFIED      => [self::CERT_PROVISIONING, self::FAILED_CHALLENGE, self::FAILED_RATE_LIMIT, self::DISABLED],
-        self::CERT_PROVISIONING => [self::ACTIVE, self::FAILED_CHALLENGE, self::FAILED_RATE_LIMIT],
+        self::CERT_PROVISIONING => [self::ACTIVE, self::FAILED_CHALLENGE, self::DISABLED],
         self::ACTIVE            => [self::DISABLED],
         self::FAILED_DNS        => [self::PENDING_DNS, self::DISABLED],
         self::FAILED_CHALLENGE  => [self::PENDING_DNS, self::DISABLED],
         self::FAILED_RATE_LIMIT => [self::PENDING_DNS, self::DISABLED],
-        self::DISABLED          => [self::DNS_VERIFIED, self::PENDING_DNS],
+        self::DISABLED          => [self::PENDING_DNS],
     ];
+
+    /** @return array<string, list<string>> the full edge map, from => [to, ...] */
+    public static function transitions(): array
+    {
+        return self::TRANSITIONS;
+    }
 
     public static function canTransition(string $from, string $to): bool
     {
