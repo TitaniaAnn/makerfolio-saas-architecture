@@ -9,6 +9,13 @@ multi-image galleries, Stripe-powered shop, events, announcements, downloadable 
 theming, email templates, 2FA, activity log. Monetization is mostly on **brand, URL and
 selling** (custom domain, no "Powered by" footer, own-site checkout), with content caps on Free.
 
+The vocabulary is discipline-neutral: each tenant picks the word for one item of their work —
+"piece" by default, or work / project / performance / a custom singular+plural — at signup or in
+Settings (`WorkNoun`, three per-tenant settings keys, no DDL), and every admin and public string
+that names the work routes through it. Event types likewise cover artists whose work *is* an
+event (performance, workshop, exhibition, residency). The `piece` table and `/admin/pieces/`
+routes keep their names; only the words people read change.
+
 ### Plans
 
 Tiers and prices are data, not code: `public.tiers` + `public.plans`, edited in platform-admin,
@@ -63,7 +70,7 @@ canonical URLs and structured data come from one place.)
 | Object storage | S3-compatible via a `Storage` interface (`LocalStorage` / `S3Storage`) | `STORAGE_DRIVER` env selects; R2/B2/S3 all work |
 | Mail | AWS SES (`MAIL_DRIVER=ses`) | Platform identity for Free/Pro; per-tenant DKIM sender identities for Studio; SNS bounce/complaint webhook |
 | Payments | Stripe Billing (platform plane) + Stripe Connect (tenant shop plane) | Two accounts/planes that never cross; see [05-billing](05-billing-and-payments.md) |
-| Tests | PHPUnit 10 (~650 tests, DB-free via in-memory SQLite bootstrap) + 47 smoke scripts under `bin/` | Pure-logic unit tests; smokes cover DB-touching flows |
+| Tests | PHPUnit 10 (~700 tests, DB-free via in-memory SQLite bootstrap) + 47 smoke scripts under `bin/` | Pure-logic unit tests; smokes cover DB-touching flows |
 
 ## Request classes
 

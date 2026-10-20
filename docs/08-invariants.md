@@ -42,7 +42,9 @@ isolation — one broken tenant never blocks the fleet.
 `platform_admin_id` (2FA-mandatory), per-tenant `admin_id`, anonymous shop customer — separate
 session keys, separate tables, no shared user ids. Operator access to tenant admin goes only
 through the audited `support_sessions` flow (`via_support=true` on every write, visible to the
-tenant).
+tenant). Both authenticated keyspaces carry per-account `session_epoch` revocation (stamped at
+login, re-checked per request; bumped on password/role change, 2FA reset, and platform
+deactivation/demotion).
 
 ### 7. Custom-domain certs only issue for DNS-verified domains
 Caddy's on-demand TLS asks `/caddy-ask`, which 200s only for hostnames in `tenant_domains` with

@@ -6,15 +6,15 @@ Authoritative column-level detail lives in the main repo's `design-docs/MODELS.m
 ## Public schema (platform-owned)
 
 One row per logical entity, owned by the operator. Grouped by subsystem, with the migration that
-introduced each (`sql/public/NNN_*.sql`, currently 001–041):
+introduced each (`sql/public/NNN_*.sql`, currently 001–044):
 
 ### Tenant directory & lifecycle
 | Table | Purpose |
 |---|---|
-| `tenants` | The directory: handle, `schema_name`, status machine, `plan_id`, denormalized `site_title`/`contact_email` (synced by `Tenant::syncContactEmail()` + nightly reconcile cron), Stripe customer id, Stripe **Connect** columns (`stripe_connect_account_id` unique, status, `charges_enabled`), suspension/deletion timestamps, `handle_released_at` (stamped 90 days out on deletion; see the cooldown caveat in [02-tenancy](02-tenancy.md)), `marketing_opt_out`, `site_published`, `first_published_at` + `last_admin_login_at` (growth metrics), `referral_source` / `referrer_tenant_slug` / `referred_at` (first-touch attribution; the referrer is a slug string, not an FK) |
+| `tenants` | The directory: handle, `schema_name`, status machine, `plan_id`, denormalized `site_title`/`contact_email` (synced by `Tenant::syncContactEmail()` + nightly reconcile cron), Stripe customer id, Stripe **Connect** columns (`stripe_connect_account_id` unique, status, `charges_enabled`), suspension/deletion timestamps, `handle_released_at` (stamped 90 days out on deletion; see the cooldown caveat in [02-tenancy](02-tenancy.md)), `marketing_opt_out`, `site_published`, `seo_noindex` (denormalized from the tenant's SEO setting so the apex sitemap can exclude opted-out tenants without a schema switch), `first_published_at` + `last_admin_login_at` (growth metrics), `referral_source` / `referrer_tenant_slug` / `referred_at` (first-touch attribution; the referrer is a slug string, not an FK) |
 | `plans` | One row per tier × billing interval (interval-specific because Stripe Price IDs are); free-form `tier` name; `max_*` caps (pieces, photos/piece, upload bytes, products, templates, storage, admin users, domains, mail/day), entitlement flags (`allow_custom_domain`, footer removal, team users, custom sender, …, plus `shop_links` / `shop_checkout`), `availability` (`BUYABLE`/`COMING_SOON`/`TEASER`), promo columns, `shop_application_fee_bps`. Plans are deprecated (`is_active=false`), never deleted. Enforcement reads plan rows |
 | `tiers` | Tier registry (Free/Basic/Pro/Studio today): a tier's name + entitlement template, so a tier can exist before its first price point; tier saves keep it and the tier's plan rows in sync |
-| `signups` | Pre-verification holding pen — a schema is only provisioned after email verification. Abandoned at 14 d, hard-deleted at 90 d |
+| `signups` | Pre-verification holding pen — a schema is only provisioned after email verification. Carries the signup-chosen `work_noun` to the new tenant's settings at verify time (verify may run in a different browser session). Abandoned at 14 d, hard-deleted at 90 d |
 | `signup_attempts`, `auth_attempts` | Rate-limit ledgers (signup; forgot-password / transfer-accept) |
 | `handle_reservations` | Runtime-reserved handles (trademarks, one-offs) on top of the hard-coded list |
 | `handle_redirects` | 301 mapping old handle → tenant for 1 year after a rename |
@@ -40,7 +40,7 @@ introduced each (`sql/public/NNN_*.sql`, currently 001–041):
 ### Platform operations
 | Table | Purpose |
 |---|---|
-| `platform_admin_users` | Operator team; 2FA mandatory; `is_superadmin` gates destructive actions |
+| `platform_admin_users` | Operator team; 2FA mandatory; `is_superadmin` gates destructive actions; `session_epoch` backs instant revocation. Managed from `/platform-admin/team/` (superadmin-only, lockout-guarded: no self-deactivation/demotion, never zero active superadmins) |
 | `platform_admin_activity` | Append-only audit of every operator action (including what each sweep cron changed, and `billing.plan_change` rows the growth rollup reads for MRR movement) |
 | `support_sessions` | Audited "log in as tenant" records: admin, tenant, required reason, 1-hour expiry |
 | `usage_rollups` | Hourly per-tenant snapshots (piece/product counts, storage bytes) so dashboards never scan tenant schemas live |
@@ -50,7 +50,7 @@ introduced each (`sql/public/NNN_*.sql`, currently 001–041):
 ## Tenant schema (one per tenant)
 
 Every inherited CMS table, unchanged in shape, namespaced inside `tenant_<id>`
-(canonical DDL: `sql/init.postgres.sql`; incremental: `sql/migrations.postgres/001–032`, numbered
+(canonical DDL: `sql/init.postgres.sql`; incremental: `sql/migrations.postgres/001–036`, numbered
 sparsely):
 
 `admin_users` (+ `role` column for Studio tiers), `settings` (KV: site name, theme, page-text and
@@ -68,7 +68,12 @@ makers; `admin_activity` gained `via_support` + `support_session_id` for the sup
 trail; `piece.created_by` supports the CONTRIBUTOR edit-own role gate; `products.fulfillment`
 (`linked` / `checkout`) separates link-out catalog items from Connect-checkout ones; gallery images
 record pixel width/height so templates can emit them (no layout shift); `admin_users.totp_last_step`
-backs the TOTP replay guard; the tenant `stripe_webhook_events` ledger gained `handler_result`.
+backs the TOTP replay guard; the tenant `stripe_webhook_events` ledger gained `handler_result`;
+`admin_users.session_epoch` backs session revocation (see [06-security](06-security.md));
+`admin_activity.admin_id` and `password_resets.admin_id` gained real FKs (`SET NULL` / `CASCADE` —
+both in-schema, so invariant 2 is untouched); `events.event_type` widened with the artist types
+(performance, workshop, exhibition, residency); the work-noun vocabulary lives as three
+`settings` keys with no DDL.
 
 ## Cross-schema rules (invariant 2)
 

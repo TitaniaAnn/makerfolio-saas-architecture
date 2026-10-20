@@ -100,6 +100,13 @@ box is the apex. The fix is one resolver, used everywhere:
 - Each tenant gets its own `sitemap.xml` on its canonical host (the shop entry only when the plan
   has `shop_links`), `robots.txt` advertises it, and an unpublished site's sitemap 404s. The apex
   sitemap lists published ACTIVE/GRACE tenants.
+- SEO policy is per-tenant (`includes/Seo.php`): automatic meta derivation from the site's own
+  content by default, with a manual mode (`seo_auto` off) where the maker's own homepage
+  title/description and share image take over — a blank manual field falls back to the automatic
+  value, so taking control never blanks the SEO. A `seo_noindex` setting emits
+  `<meta robots noindex,nofollow>` on every page and is denormalized onto `public.tenants`
+  (mirroring `site_published`) so the apex sitemap can exclude an opted-out tenant without a
+  per-tenant schema switch.
 
 This is the one place the SEO work reached into inherited controllers: eleven public pages moved
 onto `tenant_head()`. Tenancy itself still never touches them.

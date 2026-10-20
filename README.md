@@ -208,7 +208,7 @@ This is a reference architecture. It is deliberately missing:
   implement the same contracts and run with `composer test`.
 - **The product's test suites.** Each ARCHITECTURE.md section ends
   with *Verified by*, naming the PHPUnit tests and smoke scripts in
-  the product repo (~650 tests, 47 smokes) that pin that section's
+  the product repo (~700 tests, 47 smokes) that pin that section's
   contract against the real implementation. The tests here pin the
   same contracts against the toy cut.
 - **Operational secrets.** Deploy runbooks, incident playbooks, and

@@ -10,6 +10,28 @@ A single browser session can simultaneously hold three non-overlapping identitie
 | `admin_id` | `<tenant>.admin_users` | `<tenant-host>/admin/` | Local password (email or username) + optional OAuth + optional TOTP; per-tenant — user id 1 exists in every tenant with no relation |
 | anonymous shop customer | — | tenant public site | Identified by email at checkout; Stripe holds payment PII |
 
+The operator team itself is managed at `/platform-admin/team/` (superadmin-only, every mutation
+audited) with lockout guards as pure, unit-tested decisions: no self-deactivation, no revoking
+your own superadmin, and never zero active superadmins (otherwise recovery means the CLI). New
+accounts get a temp password shown once and detour through 2FA enrollment on first login — the
+mandatory-2FA invariant holds because no session is ever established for an unenrolled row.
+
+## Session revocation — epochs on both planes
+
+Every tenant `admin_users` row and every `public.platform_admin_users` row carries a
+`session_epoch`. Login stamps the current value into the session; every request re-checks it, so
+bumping the epoch evicts that account's *other* live sessions on their next request. Bumps fire
+wherever "this credential may be compromised" is the subtext: password change (admin-UI edit or
+forgot-password reset), role change (a demoted OWNER loses OWNER powers on the open session, not
+at the next login), 2FA reset, and — on the platform plane — deactivation or superadmin
+revocation. The tenant-side check fails **closed** when the admin row is gone (deleted admin =
+dead session) and fails open only when the column doesn't exist yet (an un-migrated self-host
+schema); the platform-side check additionally re-reads `is_active` on every request. The
+mechanism arrived across the 2026-10 audit campaign: the epoch columns and password-path bumps
+first, then the campaign's only High (AUTH-H1, sixth pass) caught that the deactivate/demote
+"evict now" controls changed the database but left live sessions valid until cookie expiry —
+closed the same day by wiring them into the same bump.
+
 ## Tenant data isolation — three layers
 
 1. **`search_path`** (the primary mechanism): set once in bootstrap; forgetting it fails *loud*
@@ -53,8 +75,15 @@ Carried over from the single-tenant CMS and treated as contracts:
 - **Login rate limiting**: 5 failures/IP/10 min via `login_attempts` for tenant admins;
   `auth_attempts` extends this to forgot-password, transfer-accept, and the platform-admin
   console (password and TOTP challenge feed one counter, so the second factor can't be
-  brute-forced separately). OAuth `state` compared with `hash_equals`; Google sign-in requires a
-  verified email.
+  brute-forced separately).
+- **OAuth**: `state` nonces live in per-provider session slots (`OAuthState`, one namespace per
+  auth plane) and are compared with `hash_equals` — a login page rendering two providers' buttons
+  can't clobber one nonce with the other. Google sign-in requires a verified email. OAuth login
+  honors the account's TOTP: it detours through the same 2FA challenge as a password login, so an
+  enabled second factor can't be bypassed by "Sign in with GitHub" (2026-10 audit, SEC-3). And
+  OAuth *provisions* a new admin only on an immutable provider id from the allow-list (GitHub
+  numeric id / Google `sub`); a plain username or email signs in an already-linked account but
+  never mints one, so a recycled GitHub username can't claim admin access (OAUTH-1).
 - **TOTP replay**: each admin row records the last accepted time step (`totp_last_step`, tenant
   and platform), so a code that already worked can't be replayed inside its ±1-step window.
 - **Trusted proxies**: client IP honors `CF-Connecting-IP`, then `X-Forwarded-For`, only when
@@ -113,9 +142,10 @@ renewal stops for long-suspended/deleted tenants.
 
 Two append-only audit logs (no update/delete UI even for superadmins; legal redaction is a
 separate referencing row): per-tenant `admin_activity` and platform-wide
-`platform_admin_activity` — the latter also records what every state-changing sweep cron did.
-Three security audits have run: a scoped pre-launch pass over the admin, platform, signup and
-webhook surfaces, then two full-codebase passes.
+`platform_admin_activity` — the latter also records what every state-changing sweep cron did,
+and the former now covers shop, order and social mutations, not just content edits (2026-10).
+Security audits have run in waves: a scoped pre-launch pass over the admin, platform, signup and
+webhook surfaces, then full-codebase passes.
 
 - **2026-05-30**: no HIGH findings; MEDIUM/LOW defense-in-depth gaps fixed (path-traversal anchor,
   `public.*` qualification, table-name whitelists).
@@ -126,6 +156,16 @@ webhook surfaces, then two full-codebase passes.
   guard, HSTS, plan-cap fail-closed, the Connect webhook's transaction fix (see
   [05-billing](05-billing-and-payments.md)), and gating the webhook test-mode bypass to non-FPM
   contexts. Every finding has a merged fix except the deliberate `img-src https:` tradeoff.
+- **2026-10 (PRs #195–#214)**: a campaign of six successive whole-repo audits (`CODE_AUDIT.md`
+  in the product repo) over five days — audit, same-day fix wave, re-audit until the pass came
+  back clean. Fix waves covered auth and OAuth hardening, billing and shop correctness, Postgres
+  dialect and CI coverage, XSS, and privacy; every finding ended merged-fixed or retained by a
+  documented decision, with no Critical at any pass. Out of the campaign came the session-epoch
+  revocation above, OAuth 2FA + immutable-id provisioning, per-provider OAuth state, the
+  `checkout.session.expired` handling, and the in-schema `admin_id` FKs. The sixth pass's High
+  (AUTH-H1) was the session-revocation gap described above — the instructive part being that five
+  prior passes missed it because each verified the epoch *mechanism* without asking which "evict
+  now" controls never called it.
 
 An accessibility review ran in the same window (71 pages, WCAG 2.1 A/AA ruleset); its findings
 were fixed in follow-up PRs. It isn't a security control, but it shared the audit's

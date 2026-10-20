@@ -56,9 +56,16 @@ platform endpoint `/platform-webhook/connect/` runs the contract in two layers:
    `tenants.stripe_connect_account_id`) or `IGNORED` for an account the platform doesn't track.
 2. **Dispatch without an outer transaction.** `account.updated` is a single idempotent UPDATE of
    the Connect flags on `public.tenants`. Shop payment events (`checkout.session.completed`,
-   `payment_intent.payment_failed`) go to `ShopOrders::processConnectShopEvent()`, which calls
-   `setSchema`, runs the inherited INSERT-first dedup against the tenant's own
-   `stripe_webhook_events`, then fulfils inside its own transaction and sends mail after it.
+   `checkout.session.expired`, `payment_intent.payment_failed`) go to
+   `ShopOrders::processConnectShopEvent()`, which calls `setSchema`, runs the inherited
+   INSERT-first dedup against the tenant's own `stripe_webhook_events`, then fulfils inside its
+   own transaction and sends mail after it. The three events divide cleanly: `completed` fulfils
+   the order; `expired` (Stripe fires it when the ~30-minute session lapses) releases the
+   abandoned cart's reserved stock; `payment_failed` is acknowledged but deliberately releases
+   nothing — a failed attempt can still be retried inside the same live session, so releasing on
+   failure would double-free stock the eventual `completed` still needs (2026-10 audit, BUG-3;
+   the `expired` dispatch itself was a 2026-10 fix — before it, abandoned Connect carts held
+   their stock reservation until manual cleanup).
 3. **Stamp the public row** after the handler returns; a throw records `FAILED` and returns 500
    so Stripe retries, and the tenant-side dedup stops fulfilment from running twice.
 

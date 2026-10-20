@@ -659,6 +659,17 @@ its password and TOTP steps had no rate limit at all. Both now feed
 one per-IP counter, and TOTP codes can't be replayed inside their
 window on either keyspace.
 
+The 2026-10 audit campaign closed the next class: revocation. Admin
+rows on both planes now carry a `session_epoch`, stamped into the
+session at login and re-checked per request; password and role
+changes, 2FA resets, and platform-side deactivation or demotion
+bump it, so "evict now" actually ends the account's other live
+sessions instead of waiting out the cookie. The same campaign made
+tenant OAuth honor an enabled TOTP (it could previously be bypassed
+by "Sign in with GitHub") and restricted OAuth provisioning to
+immutable provider ids, so a recycled username can't mint admin
+access.
+
 ### Why not the alternatives
 
 **One users table with roles** — puts platform-operator credentials
@@ -689,7 +700,8 @@ keyspace, not an extension of any current one.
 
 `tests/SupportSessionTest.php`, `tests/RoleTest.php`,
 `tests/PlatformAuthTest.php`, `tests/TotpTest.php` (replay guard),
-`tests/AuthClientIpTest.php`, `bin/support-session-smoke.php`,
+`tests/AuthClientIpTest.php`, `tests/PlatformTeamTest.php` (the
+team-management lockout guards), `bin/support-session-smoke.php`,
 `bin/role-gates-smoke.php`, `bin/platform-rate-limit-smoke.php` in
 the product repo. Walkthrough:
 [code/02-auth-and-security.md](code/02-auth-and-security.md).
