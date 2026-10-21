@@ -85,7 +85,11 @@ Carried over from the single-tenant CMS and treated as contracts:
   numeric id / Google `sub`); a plain username or email signs in an already-linked account but
   never mints one, so a recycled GitHub username can't claim admin access (OAUTH-1).
 - **TOTP replay**: each admin row records the last accepted time step (`totp_last_step`, tenant
-  and platform), so a code that already worked can't be replayed inside its ±1-step window.
+  and platform), so a code that already worked can't be replayed inside its ±1-step window. The
+  step advance is atomic (a conditional `UPDATE … WHERE totp_last_step IS NULL OR
+  totp_last_step < :step`, accepted only when a row moved), so two racing requests presenting the
+  same valid code can't both pass; recovery codes are consumed under a `SELECT … FOR UPDATE` row
+  lock for the same reason (2026-10, ninth audit).
 - **Trusted proxies**: client IP honors `CF-Connecting-IP`, then `X-Forwarded-For`, only when
   `REMOTE_ADDR` is loopback or in `TRUSTED_PROXIES` (exact IPs or CIDRs). PHP-FPM's direct peer is
   Caddy on the Docker network, so that is what gets trusted; Cloudflare's ranges deliberately
@@ -156,16 +160,21 @@ webhook surfaces, then full-codebase passes.
   guard, HSTS, plan-cap fail-closed, the Connect webhook's transaction fix (see
   [05-billing](05-billing-and-payments.md)), and gating the webhook test-mode bypass to non-FPM
   contexts. Every finding has a merged fix except the deliberate `img-src https:` tradeoff.
-- **2026-10 (PRs #195–#214)**: a campaign of six successive whole-repo audits (`CODE_AUDIT.md`
-  in the product repo) over five days — audit, same-day fix wave, re-audit until the pass came
-  back clean. Fix waves covered auth and OAuth hardening, billing and shop correctness, Postgres
+- **2026-10 (PRs #195–#226)**: a campaign of ten successive whole-repo audits (`CODE_AUDIT.md`
+  in the product repo) over seven days — audit, same-day fix wave, re-audit. Fix waves covered auth and OAuth hardening, billing and shop correctness, Postgres
   dialect and CI coverage, XSS, and privacy; every finding ended merged-fixed or retained by a
   documented decision, with no Critical at any pass. Out of the campaign came the session-epoch
   revocation above, OAuth 2FA + immutable-id provisioning, per-provider OAuth state, the
   `checkout.session.expired` handling, and the in-schema `admin_id` FKs. The sixth pass's High
   (AUTH-H1) was the session-revocation gap described above — the instructive part being that five
   prior passes missed it because each verified the epoch *mechanism* without asking which "evict
-  now" controls never called it.
+  now" controls never called it. Passes seven through ten came back 0 Critical/High/Medium with
+  single-digit Low lists, mostly consumed the same day; those later waves produced the shared
+  `WebhookLedger` claim helper and `TestMode` gate (one definition each for the two most
+  security-sensitive previously-copied blocks), the atomic TOTP step-advance and row-locked
+  recovery-code consumption above, and dropped scanner-driven `/caddy-ask` denials from the
+  operator audit log (they flooded it; denials still 404 and domain state is still observed by
+  the TLS probe).
 
 An accessibility review ran in the same window (71 pages, WCAG 2.1 A/AA ruleset); its findings
 were fixed in follow-up PRs. It isn't a security control, but it shared the audit's

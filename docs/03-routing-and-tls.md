@@ -106,7 +106,11 @@ box is the apex. The fix is one resolver, used everywhere:
   value, so taking control never blanks the SEO. A `seo_noindex` setting emits
   `<meta robots noindex,nofollow>` on every page and is denormalized onto `public.tenants`
   (mirroring `site_published`) so the apex sitemap can exclude an opted-out tenant without a
-  per-tenant schema switch.
+  per-tenant schema switch. A noindexed site deliberately stays *crawlable* in `robots.txt` —
+  blocking it would stop crawlers from ever seeing the `noindex` meta. The automatic share image
+  has a real fallback chain (hero → lead piece → platform default) with `og:image:alt` and
+  dimensions, a maker-set image wins over the derived one, auto descriptions are tenant-unique,
+  and thin pages are content-gated out of the sitemap (2026-10 refinements).
 
 This is the one place the SEO work reached into inherited controllers: eleven public pages moved
 onto `tenant_head()`. Tenancy itself still never touches them.

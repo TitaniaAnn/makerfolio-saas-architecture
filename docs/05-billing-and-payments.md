@@ -30,7 +30,11 @@ exists for the self-host product; the SaaS shop uses the Connect plane.
 
 ## Webhook idempotency contract (invariant 3)
 
-Every receiver copies the contract proven in the inherited shop webhook:
+Every receiver runs the contract proven in the inherited shop webhook. The claim step used to be
+three copied blocks; since the 2026-10 audits (DUP-2) it has one definition —
+`includes/WebhookLedger.php` INSERTs the ledger row and classifies the outcome
+(`fresh` / `retry` / `duplicate`), while each receiver keeps its own HTTP responses and its
+handler/transaction/stamp logic:
 
 1. **INSERT the event id into the dedup ledger first** (`public.billing_events` /
    `tenant.stripe_webhook_events`; the unique key serializes concurrent retries).
@@ -94,7 +98,11 @@ cents), which the nightly growth rollup reads for MRR movement and the audit pru
 Upgrade flow: `/admin/billing/upgrade.php` → Stripe Checkout → webhook flips the plan. Cancel
 flow: `cancel_at_period_end=true` via the Stripe API, then **trust the webhook** to mirror. The
 `stripe-dunning-sync` cron (hourly) reconciles subscription status for tenants in GRACE as a
-belt-and-braces sweep; `payment-reminder-emails` nudges daily.
+belt-and-braces sweep; `payment-reminder-emails` nudges daily. The cron and the
+`customer.subscription.deleted` handler share one `Subscription` revert-to-free helper (plan
+mirror + `billing.plan_change` audit row + GRACE lift, with an out-of-order-resubscribe guard),
+so a dropped webhook can't leave a cancelled tenant keeping paid entitlements, and the two paths
+can't drift (2026-10 audit).
 
 Hardening shipped from the Stripe audit: idempotency keys on `Refund::create` and
 `Customer::create` (a request-timeout retry can't double-refund/double-create), and an explicitly

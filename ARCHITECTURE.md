@@ -282,7 +282,11 @@ enumerated list of events. The app's role in an upgrade is to create
 the Checkout session and wait; the webhook flips the plan.
 
 Every webhook endpoint follows the same idempotency contract,
-inherited from the CMS's shop webhook and reused verbatim:
+inherited from the CMS's shop webhook — first copied verbatim, and
+since the 2026-10 audits extracted into one shared claim helper
+(`includes/WebhookLedger.php` in the product) that all three
+receivers call, so the contract the repo guards most carefully has
+exactly one definition:
 
 1. **INSERT the event id into a dedup ledger first** — the unique
    key serializes concurrent deliveries; a duplicate INSERT means
